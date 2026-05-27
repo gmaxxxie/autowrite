@@ -38,7 +38,7 @@ AutoWrite CLI 专为**非虚构类书籍**设计，尤其擅长：
 
 ```bash
 # 安装
-git clone https://github.com/<your-username>/autowrite.git && cd autowrite
+git clone https://github.com/gmaxxxie/autowrite.git && cd autowrite
 export PATH="$PWD:$PATH"
 
 # 使用
@@ -90,7 +90,7 @@ autowrite status mybook                        # 查看状态
 ### 方式一：Git 克隆（推荐）
 
 ```bash
-git clone https://github.com/<your-username>/autowrite.git
+git clone https://github.com/gmaxxxie/autowrite.git
 cd autowrite
 
 # 添加到 PATH（二选一）
@@ -101,7 +101,7 @@ echo 'export PATH="$PWD:$PATH"' >> ~/.bashrc  # 永久生效
 ### 方式二：软链接到 `~/.local/bin`
 
 ```bash
-git clone https://github.com/<your-username>/autowrite.git
+git clone https://github.com/gmaxxxie/autowrite.git
 cd autowrite
 mkdir -p ~/.local/bin
 ln -s "$(pwd)/autowrite" ~/.local/bin/autowrite
