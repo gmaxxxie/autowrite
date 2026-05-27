@@ -2,21 +2,145 @@
 
 > AI Native 的书籍写作命令行工具。输入书名，输出一本完整的书。
 
-## 定位
-
-AutoWrite CLI 是一个**Agent-Friendly**的写书工具：
-
-- 默认基于 **Hermes Agent** 运行
-- 同时兼容 **Codex**、**Claude Code**、以及任何可以通过 CLI 调用的 AI Agent
-- 核心逻辑在 `book-agent-core/`，CLI 只是壳
-
-## 一句话理解
-
-```
+**一句话理解：**
+```bash
 autowrite init mybook          # 初始化一本书
 autowrite write next mybook    # 写下一章（规划→草稿→审计→修订）
 autowrite status mybook        # 查看状态
 ```
+
+---
+
+## 安装
+
+### 环境要求
+
+- Bash 4.0+
+- Python 3.8+（仅在使用 `book-agent-core` 时需要）
+- 可选：`pyyaml`（仅在使用 token 预算配置时需要）
+
+### 步骤
+
+```bash
+# 1. 克隆
+git clone https://github.com/<your-username>/autowrite.git
+cd autowrite
+
+# 2. 添加到 PATH（二选一）
+# 方式 A：直接加到 PATH（当前终端有效）
+export PATH="$PWD:$PATH"
+
+# 方式 B：软链接到 ~/.local/bin（永久）
+mkdir -p ~/.local/bin
+ln -s "$(pwd)/autowrite" ~/.local/bin/autowrite
+export PATH="$HOME/.local/bin:$PATH"
+
+# 3. 验证
+autowrite --help
+```
+
+---
+
+## 使用
+
+### 1. 初始化一本书
+
+```bash
+autowrite init mybook --genre non-fiction
+```
+
+这会在 `$BOOKS_DIR/mybook`（默认 `~/books/mybook`）下创建书籍工作区：
+
+```
+~/books/mybook/
+├── 00-index/              # 目录 + 真相文件
+├── 01-原始素材/           # 原始材料
+├── 02-概念卡/             # 概念沉淀
+├── 03-方法论卡/           # 方法论沉淀
+├── 04-案例库/             # 案例积累
+├── 05-章节草稿/           # 章节输出
+└── 06-出版版/             # 终稿
+```
+
+### 2. 查看帮助
+
+```bash
+autowrite --help           # 主命令帮助
+autowrite write --help     # write 子命令帮助
+autowrite audit --help     # audit 子命令帮助
+```
+
+### 3. 写下一章
+
+```bash
+autowrite write next mybook
+```
+
+这会执行完整管道：**规划 → 草稿 → 审计 → 修订**
+
+### 4. 查看状态
+
+```bash
+autowrite status mybook           # 概览
+autowrite status mybook --detail  # 详细
+```
+
+### 5. 其他命令
+
+| 命令 | 说明 |
+|------|------|
+| `autowrite init <书名>` | 初始化书籍工作区 |
+| `autowrite write next <书名>` | 写下一章（完整管道） |
+| `autowrite write count <书名> <N>` | 连续写 N 章 |
+| `autowrite audit <书名> [章节]` | 审计指定章节 |
+| `autowrite revise <书名> [章节]` | 修订章节 |
+| `autowrite status <书名>` | 查看状态 |
+| `autowrite plan <书名>` | 生成章节规划 |
+| `autowrite brief <书名> --direction` | 方向协商 |
+| `autowrite validate <书名>` | 校验书稿 |
+| `autowrite list` | 列出所有书籍 |
+
+---
+
+## 与 AI Agent 配合
+
+### Hermes Agent（推荐）
+
+AutoWrite CLI 默认基于 **Hermes** 运行。Hermes Agent 读取 `AGENTS.md` 中的路由规范，自动调度 Skill 完成写作。
+
+```bash
+# Hermes Agent 收到指令后执行
+autowrite init "AI产品实践"
+autowrite write next "AI产品实践"
+```
+
+### Codex / Claude Code
+
+任何 Agent 只要能调用 shell 命令，就能操作 AutoWrite：
+
+```
+# Codex
+codex "用 autowrite 创建一本关于 Go 语言设计的书，然后写前五章"
+
+# Claude Code
+claude "执行: autowrite init golang-design && autowrite write count golang-design 5"
+```
+
+---
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BOOKS_DIR` | `~/books` | 书籍工作区根目录 |
+| `AUTOWRITE_ROOT` | CLI 所在目录 | 框架根目录 |
+
+```bash
+# 自定义书籍目录
+BOOKS_DIR=/data/my-books autowrite init mybook
+```
+
+---
 
 ## 核心架构
 
@@ -41,94 +165,7 @@ autowrite/
 └── AGENTS.md                   # Agent 路由规范
 ```
 
-## 工作原理
-
-```
-用户/Agent 调用 autowrite 命令
-        ↓
-    bash CLI 解析命令
-        ↓
-    调用 book-agent-core（Python）
-        ↓
-    路由到具体 Skill（Hermes）
-        ↓
-    执行 → 审计链 → 状态更新
-```
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `BOOKS_DIR` | `~/books` | 书籍工作区根目录 |
-| `AUTOWRITE_ROOT` | CLI 所在目录 | 框架根目录 |
-
-## 安装
-
-```bash
-# 克隆
-git clone https://github.com/<your-username>/autowrite.git
-cd autowrite
-
-# 添加到 PATH（可选）
-export PATH="$PWD:$PATH"
-
-# 或软链接
-ln -s "$(pwd)/autowrite" /usr/local/bin/autowrite
-```
-
-## 快速开始
-
-```bash
-# 1. 初始化一本书
-autowrite init mybook --genre non-fiction
-
-# 2. 查看帮助
-autowrite --help
-
-# 3. 写下一章
-autowrite write next mybook
-
-# 4. 查看状态
-autowrite status mybook
-```
-
-## 与 Hermes Agent 配合
-
-AutoWrite CLI 设计上由 Hermes Agent 驱动：
-
-```bash
-# Hermes Agent 调用方式
-hermes "用 autowrite 初始化一本关于产品经理AI应用的书"
-
-# Agent 内部执行
-autowrite init "AI产品实践" --genre non-fiction
-autowrite write next "AI产品实践"
-```
-
-## 与其他 Agent 配合
-
-Codex、Claude Code 等 Agent 可以直接调用 CLI：
-
-```
-# Codex
-codex "用 autowrite 创建一本关于 Go 语言设计的书，然后写前五章"
-
-# Claude Code
-claude "执行: autowrite init golang-design && autowrite write next golang-design"
-```
-
-## 书籍工作区结构
-
-```
-~/books/<书名>/
-├── 00-index/           # 目录 + 真相文件
-├── 01-原始素材/        # 素材输入
-├── 02-概念卡/          # 概念沉淀
-├── 03-方法论卡/        # 方法论沉淀
-├── 04-案例库/          # 案例积累
-├── 05-章节草稿/        # 章节输出
-└── 06-出版版/          # 终稿
-```
+---
 
 ## 审计链
 
@@ -141,6 +178,8 @@ claude "执行: autowrite init golang-design && autowrite write next golang-desi
 5. `book-persona-audit` — 8路人物评审
 6. `book-chapter-revise` — 修订
 
-##  License
+---
+
+## License
 
 MIT
