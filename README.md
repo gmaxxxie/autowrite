@@ -6,6 +6,13 @@
   <img src="https://img.shields.io/badge/Python-3.8+-yellow.svg?style=flat-square" alt="Python">
 </p>
 
+<p align="center">
+  <img src="https://cdn.hiapi.ai/relays/ali_image/2026-05/c92e17d515aaeef1.png" width="48%" alt="AutoWrite CLI Overview">
+  <img src="https://cdn.hiapi.ai/relays/ali_image/2026-05/62949d561b1e2db2.png" width="48%" alt="AutoWrite Architecture">
+</p>
+
+---
+
 > **AI Native 的书籍写作命令行工具。输入书名，输出一本完整的书。**
 
 AutoWrite CLI 是一个 **Agent-Friendly** 的写书框架——默认基于 **Hermes Agent** 驱动，同时兼容 Codex、Claude Code 等任何能调用命令行的 AI Agent。
