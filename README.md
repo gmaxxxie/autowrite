@@ -115,13 +115,21 @@ export PATH="$HOME/.local/bin:$PATH"
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
-### 方式三：直接运行脚本
+### 方式三：直接运行脚本（适合尝鲜）
+
+不想配置 PATH？克隆后直接进目录运行：
 
 ```bash
-# 无需安装，直接运行主入口
-./autowrite --help
-./autowrite init mybook
+git clone https://github.com/gmaxxxie/autowrite.git
+cd autowrite
+
+# 每次使用都要先进目录
+./autowrite init mybook       # 初始化书籍
+./autowrite write next mybook  # 写下一章
+./autowrite status mybook      # 查看状态
 ```
+
+**局限**：必须身处 autowrite 目录，无法全局调用。推荐方式一/二。
 
 ### 验证安装
 
