@@ -6,7 +6,8 @@ BOOK_NAME="${1:-}"
 STATUS="${2:-}"
 DETAIL="${3:-}"
 
-AUTOWRITE_ROOT="${AUTOWRITE_ROOT:-/home/max/AutoWriteO}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTOWRITE_ROOT="${AUTOWRITE_ROOT:-$SCRIPT_DIR}"
 NOTIFY_CONFIG="$HOME/.config/autowrite/notify.conf"
 
 if [[ -z "$BOOK_NAME" ]] || [[ -z "$STATUS" ]]; then
