@@ -1,0 +1,56 @@
+#!/bin/bash
+# autowrite-notify - 通知发送器 (飞书/webhook)
+# 用法: autowrite-notify <书名> <状态> <详情>
+
+BOOK_NAME="${1:-}"
+STATUS="${2:-}"
+DETAIL="${3:-}"
+
+AUTOWRITE_ROOT="${AUTOWRITE_ROOT:-/home/max/AutoWriteO}"
+NOTIFY_CONFIG="$HOME/.config/autowrite/notify.conf"
+
+if [[ -z "$BOOK_NAME" ]] || [[ -z "$STATUS" ]]; then
+  echo "用法: autowrite-notify <书名> <success|failure|blocked> [详情]"
+  exit 1
+fi
+
+load_config() {
+  if [[ -f "$NOTIFY_CONFIG" ]]; then
+    source "$NOTIFY_CONFIG"
+  fi
+}
+
+notify_feishu() {
+  if [[ -z "$FEISHU_WEBHOOK" ]]; then
+    return
+  fi
+  local COLOR="blue"
+  local EMOJI="ℹ️"
+  case "$STATUS" in
+    success) COLOR="green"; EMOJI="✅" ;;
+    failure) COLOR="red"; EMOJI="❌" ;;
+    blocked) COLOR="orange"; EMOJI="🚫" ;;
+  esac
+  local MSG="${EMOJI} AutoWriteO: ${BOOK_NAME} — ${STATUS}"
+  if [[ -n "$DETAIL" ]]; then
+    MSG="${MSG}\n${DETAIL}"
+  fi
+  curl -s -X POST "$FEISHU_WEBHOOK" \
+    -H "Content-Type: application/json" \
+    -d "{\"msg_type\":\"interactive\",\"card\":{\"elements\":[{\"tag\":\"div\",\"text\":{\"content\":\"${MSG}\",\"tag\":\"lark_md\"}}],\"header\":{\"template\":\"${COLOR}\",\"title\":{\"content\":\"AutoWriteO 通知\",\"tag\":\"plain_text\"}}}}" \
+    >/dev/null 2>&1 || true
+}
+
+notify_webhook() {
+  if [[ -z "$NOTIFY_WEBHOOK_URL" ]]; then
+    return
+  fi
+  curl -s -X POST "$NOTIFY_WEBHOOK_URL" \
+    -H "Content-Type: application/json" \
+    -d "{\"book\":\"$BOOK_NAME\",\"status\":\"$STATUS\",\"detail\":\"$DETAIL\"}" \
+    >/dev/null 2>&1 || true
+}
+
+load_config
+notify_feishu
+notify_webhook

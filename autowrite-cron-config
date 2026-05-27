@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""autowrite-cron-config: cron 任务配置读写"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+CRON_DIR = os.path.expanduser("~/.config/autowrite/cron.d")
+
+def _ensure_dir():
+    os.makedirs(CRON_DIR, exist_ok=True)
+
+def list_tasks():
+    _ensure_dir()
+    tasks = []
+    for f in sorted(os.listdir(CRON_DIR)):
+        if f.endswith(".json"):
+            with open(os.path.join(CRON_DIR, f), encoding="utf-8") as fp:
+                tasks.append(json.load(fp))
+    return tasks
+
+def add_task(book_name, schedule, action="write_next", notification=None):
+    _ensure_dir()
+    task_id = f"cron-{book_name}"
+    task = {
+        "task_id": task_id,
+        "book_name": book_name,
+        "schedule": schedule,
+        "action": action,
+        "max_concurrent": 3,
+        "notification": notification or {"on_success": "feishu", "on_failure": "feishu"},
+        "enabled": True,
+    }
+    out_path = os.path.join(CRON_DIR, f"{task_id}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(task, f, ensure_ascii=False, indent=2)
+    return task
+
+def remove_task(book_name):
+    task_id = f"cron-{book_name}"
+    out_path = os.path.join(CRON_DIR, f"{task_id}.json")
+    if os.path.isfile(out_path):
+        os.remove(out_path)
+        return True
+    return False
+
+def main():
+    if len(sys.argv) < 2:
+        print("用法: autowrite-cron-config <list|add|remove> [args...]")
+        sys.exit(1)
+    cmd = sys.argv[1]
+    if cmd == "list":
+        for t in list_tasks():
+            print(f"  {t['task_id']}: {t['book_name']} {t['schedule']} {t['action']}")
+    elif cmd == "add":
+        if len(sys.argv) < 4:
+            print("用法: autowrite-cron-config add <书名> <schedule>")
+            sys.exit(1)
+        t = add_task(sys.argv[2], sys.argv[3])
+        print(f"✓ 添加: {t['task_id']}")
+    elif cmd == "remove":
+        if len(sys.argv) < 3:
+            print("用法: autowrite-cron-config remove <书名>")
+            sys.exit(1)
+        if remove_task(sys.argv[2]):
+            print(f"✓ 移除: cron-{sys.argv[2]}")
+        else:
+            print(f"✗ 未找到: {sys.argv[2]}")
+    else:
+        print(f"未知命令: {cmd}")
+
+if __name__ == "__main__":
+    main()

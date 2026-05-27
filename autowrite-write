@@ -1,0 +1,272 @@
+#!/bin/bash
+# autowrite-write - 写章管道（带强制门禁）
+# 被 autowrite 主脚本 source 后调用 cmd_write_next
+#
+# 门禁链（全部通过才能写）:
+#   1. 模型门禁 — 当前模型是否符合要求
+#   2. G1-G8 Pre-Flight Gate — 项目基础是否就绪
+#   3. Brief 门禁 — 章节预写协商是否完成
+#   4. 前一章审计门禁 — 上一章是否通过审计
+
+: "${AUTOWRITE_ROOT:=/home/max/AutoWriteO}"
+PIPELINE_SCRIPT="$AUTOWRITE_ROOT/scripts/autowrite-write-pipeline.py"
+MODEL_GATE="$AUTOWRITE_ROOT/scripts/autowrite-model-gate"
+STATE_TOOL="$AUTOWRITE_ROOT/scripts/autowrite-state"
+
+# ─────────────────────────────────────────
+# 准备任务（生成任务文件）
+# ─────────────────────────────────────────
+cmd_write_next() {
+  local BOOK_NAME=""
+  local USER_CONTEXT=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --context)
+        USER_CONTEXT="$2"
+        shift 2
+        ;;
+      --help|-h)
+        echo "用法: autowrite write next [书名] [--context '...']"
+        return 0
+        ;;
+      *)
+        BOOK_NAME="${1:-$BOOK_NAME}"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$BOOK_NAME" ]]; then
+    echo "[✗] 请提供书名" >&2
+    return 1
+  fi
+
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    echo "[✗] 找不到书籍: $BOOK_NAME" >&2
+    return 1
+  fi
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  写章门禁检查: $BOOK_NAME"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  # ── Gate 1: 模型门禁 ──
+  if [[ -x "$MODEL_GATE" ]]; then
+    "$MODEL_GATE" check book-chapter-writer --model "${AUTOWRITE_CURRENT_MODEL:-}" >/dev/null 2>&1 || {
+      local GATE_EXIT=$?
+      if [[ $GATE_EXIT -eq 1 ]]; then
+        echo "  [✗] GATE 1 模型门禁: 阻断" >&2
+        "$MODEL_GATE" check book-chapter-writer --model "${AUTOWRITE_CURRENT_MODEL:-}" >&2
+        echo "" >&2
+        echo "  设置 AUTOWRITE_CURRENT_MODEL 或使用正确的模型" >&2
+        return 1
+      elif [[ $GATE_EXIT -eq 2 ]]; then
+        echo "  [⚠] GATE 1 模型门禁: 降级（允许继续）"
+      fi
+    }
+    echo "  [✓] GATE 1 模型门禁: 通过"
+  fi
+
+  # ── Gate 2: Pre-Flight G1-G8 ──
+  local GATE2_RESULT=0
+  if [[ -f "$STATE_TOOL" ]]; then
+    echo "  检查 Pre-Flight Gate G1-G8..."
+    python3 "$STATE_TOOL" check-gate "$BOOK_DIR" 2>&1 | while read -r line; do
+      echo "    $line"
+    done
+    GATE2_RESULT=${PIPESTATUS[0]:-0}
+    # Re-run to get exit code properly
+    python3 "$STATE_TOOL" check-gate "$BOOK_DIR" >/dev/null 2>&1 || GATE2_RESULT=1
+  else
+    echo "  [⚠] GATE 2 state tool 不可用，跳过 G1-G8 检查"
+  fi
+
+  if [[ $GATE2_RESULT -ne 0 ]]; then
+    echo "" >&2
+    echo "  [✗] GATE 2 Pre-Flight 不通过 — 补全缺失项后再写" >&2
+    echo "  缺失项路由:" >&2
+    echo "    G1 → \$book-project-workspace" >&2
+    echo "    G2 → \$book-benchmark-analysis" >&2
+    echo "    G3 → \$book-differentiation-design" >&2
+    echo "    G4/G7 → \$book-style-blueprint-engine" >&2
+    echo "    G5 → \$book-knowledge-base-builder" >&2
+    echo "    G6 → \$book-case-harvester" >&2
+    return 1
+  fi
+  echo "  [✓] GATE 2 Pre-Flight: 通过"
+  echo ""
+
+  # ── Gate 3: Brief 门禁 ──
+  local NEXT_CH
+  NEXT_CH="$(python3 "$PIPELINE_SCRIPT" _next_ch "$BOOK_NAME" 2>/dev/null || echo '')"
+  if [[ -n "$NEXT_CH" ]]; then
+    local CH_TAG
+    CH_TAG="$(printf 'ch%02d' "$NEXT_CH")"
+
+    if [[ -f "$STATE_TOOL" ]]; then
+      python3 "$STATE_TOOL" check-brief "$BOOK_DIR" "$CH_TAG" >/dev/null 2>&1 || {
+        echo "  [✗] GATE 3 Brief: ${CH_TAG} 预写 brief 未完成" >&2
+        echo "  执行: autowrite brief \"$BOOK_NAME\" $CH_TAG" >&2
+        return 1
+      }
+      echo "  [✓] GATE 3 Brief: ${CH_TAG} 已完成"
+    fi
+
+    # ── Gate 4: 前一章审计门禁 ──
+    if [[ -f "$STATE_TOOL" ]]; then
+      python3 "$STATE_TOOL" check-prev-chapter "$BOOK_DIR" "$CH_TAG" >/dev/null 2>&1 || {
+        echo "  [✗] GATE 4 前一章: 上一章审计未通过" >&2
+        echo "  先完成上一章的审计链: autowrite audit \"$BOOK_NAME\"" >&2
+        return 1
+      }
+      echo "  [✓] GATE 4 前一章审计: 通过"
+    fi
+  fi
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  ✓ 全部门禁通过"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  # ── Agent Core Steps ──
+  echo "  [1/5] 组装上下文包 (Compose)..."
+  python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import Composer
+c = Composer('$BOOK_DIR')
+pack = c.compose($NEXT_CH)
+c.save_context_pack(pack, $NEXT_CH)
+print(f'  上下文包: {pack.total_tokens} tokens, {len(pack.sections)} sections')
+" 2>/dev/null || echo "  [⚠] Composer 不可用，使用默认上下文"
+
+  echo "  [2/5] 生成章节意图 (Planner)..."
+  python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import Planner, Composer
+c = Composer('$BOOK_DIR')
+pack = c.compose($NEXT_CH)
+p = Planner('$BOOK_DIR')
+memo = p.generate_memo($NEXT_CH, pack)
+p.save_memo(memo)
+print(f'  Memo: {memo.goal[:40]}...')
+" 2>/dev/null || echo "  [⚠] Planner 不可用，跳过 memo 生成"
+
+  echo "  [3/5] 写前规则检查 (Rule Engine)..."
+  python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import RuleEngine
+import os
+engine = RuleEngine('$BOOK_DIR')
+memo_path = os.path.join('$BOOK_DIR', 'truth', 'runtime', f'ch{$NEXT_CH:02d}_memo.md')
+if os.path.isfile(memo_path):
+    with open(memo_path) as f:
+        violations = engine.check(f.read())
+    blocked = any(v.level == '阻断' for v in violations)
+    if blocked:
+        print(f'  [✗] 写前规则检查: {len(violations)} 阻断级违规')
+        sys.exit(1)
+    print(f'  写前规则检查: {len(violations)} 警告')
+else:
+    print('  写前规则检查: memo 不存在，跳过')
+" 2>/dev/null || echo "  [⚠] Rule Engine 不可用，跳过写前检查"
+
+  # 调用 Python 管道生成任务
+  python3 "$PIPELINE_SCRIPT" next "$BOOK_NAME" --context "$USER_CONTEXT"
+
+  echo ""
+  echo "  写后步骤 (写完章节后执行):"
+  echo "  [4/5] 状态提取: autowrite settle \"$BOOK_NAME\""
+  echo "  [5/5] 写后规则检查: autowrite rules \"$BOOK_NAME\" chNN"
+}
+
+# ─────────────────────────────────────────
+# 执行任务（spawn subagent）
+# ─────────────────────────────────────────
+cmd_write_exec() {
+  local TASK_FILE="$1"
+
+  if [[ -z "$TASK_FILE" ]]; then
+    echo "[✗] 请提供任务文件路径" >&2
+    return 1
+  fi
+
+  python3 "$PIPELINE_SCRIPT" exec "$TASK_FILE"
+}
+
+# ─────────────────────────────────────────
+# 连续写 N 章
+# ─────────────────────────────────────────
+cmd_write_count() {
+  local BOOK_NAME="$1"
+  local COUNT="${2:-1}"
+
+  if [[ -z "$BOOK_NAME" ]]; then
+    echo "[✗] 请提供书名" >&2
+    return 1
+  fi
+
+  if [[ ! "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
+    echo "[✗] 章节数必须为正整数" >&2
+    return 1
+  fi
+
+  if [[ "$COUNT" -gt 4 ]]; then
+    echo "[!] 单批上限 4 章，将拆分为 $(( (COUNT + 3) / 4 )) 批"
+    echo ""
+  fi
+
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    echo "[✗] 找不到书籍: $BOOK_NAME" >&2
+    return 1
+  fi
+
+  local CONF="$BOOK_DIR/book.conf"
+  if [[ ! -f "$CONF" ]]; then
+    echo "[✗] 不是有效的书籍目录: $BOOK_DIR" >&2
+    return 1
+  fi
+
+  local CURRENT_CH
+  CURRENT_CH="$(grep '^CURRENT_CHAPTER=' "$CONF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  CURRENT_CH="${CURRENT_CH:-0}"
+  local TARGET_CH
+  TARGET_CH="$(grep '^CHAPTER_TARGET=' "$CONF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  TARGET_CH="${TARGET_CH:-0}"
+
+  local END_CH=$((CURRENT_CH + COUNT))
+  if [[ "$TARGET_CH" -gt 0 ]] && [[ "$END_CH" -gt "$TARGET_CH" ]]; then
+    echo "[!] 写 $COUNT 章将超过目标 $TARGET_CH 章（当前 $CURRENT_CH → $END_CH）"
+    END_CH="$TARGET_CH"
+  fi
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  连续写 $COUNT 章: $BOOK_NAME"
+  echo "  当前: ch$((CURRENT_CH + 1))"
+  echo "  目标: ch${END_CH}"
+  echo "  每章自动执行门禁检查"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  local BATCH=1
+  local CH_START=$((CURRENT_CH + 1))
+
+  while [[ $CH_START -le $END_CH ]]; do
+    local BATCH_SIZE=4
+    local CH_END=$((CH_START + BATCH_SIZE - 1))
+    if [[ $CH_END -gt $END_CH ]]; then
+      CH_END=$END_CH
+    fi
+
+    echo "批次 $BATCH: ch$(printf '%02d' $CH_START) — ch$(printf '%02d' $CH_END)"
+    echo "  执行: autowrite write next \"$BOOK_NAME\""
+    echo "  完成后更新状态: python3 $STATE_TOOL set \"$BOOK_DIR\" chNN draft done"
+    echo ""
+    CH_START=$((CH_END + 1))
+    BATCH=$((BATCH + 1))
+  done
+}

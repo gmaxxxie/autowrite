@@ -1,0 +1,172 @@
+#!/bin/bash
+# autowrite-model-gate - 模型路由门禁
+# 用法:
+#   autowrite-model-gate check <步骤> [--model <当前模型>] [--force]
+#   autowrite-model-gate list
+#
+# 返回码:
+#   0 = 通过 (pass)
+#   1 = 阻断 (block)
+#   2 = 警告 (warn)
+
+set -e
+
+: "${AUTOWRITE_ROOT:=/home/max/AutoWriteO}"
+
+MODEL_RULES_FILE="$AUTOWRITE_ROOT/scripts/model-rules.conf"
+
+if [[ ! -f "$MODEL_RULES_FILE" ]]; then
+  echo "[✗] 模型规则文件不存在: $MODEL_RULES_FILE" >&2
+  exit 1
+fi
+
+declare -A REQUIRED_MODELS
+declare -A ALLOWED_DOWNGRADES
+
+while IFS='|' read -r STAGE REQ_MODEL DOWNGRADES; do
+  [[ "$STAGE" =~ ^#.*$ ]] && continue
+  [[ -z "$STAGE" ]] && continue
+  REQUIRED_MODELS["$STAGE"]="$REQ_MODEL"
+  ALLOWED_DOWNGRADES["$STAGE"]="$DOWNGRADES"
+done < "$MODEL_RULES_FILE"
+
+detect_current_model() {
+  if [[ -n "$AUTOWRITE_CURRENT_MODEL" ]]; then
+    echo "$AUTOWRITE_CURRENT_MODEL"
+    return 0
+  fi
+  if [[ -n "$MODEL_NAME" ]]; then
+    echo "$MODEL_NAME"
+    return 0
+  fi
+  if command -v hermes &>/dev/null; then
+    local DETECTED
+    DETECTED="$(hermes config get model 2>/dev/null || true)"
+    if [[ -n "$DETECTED" ]]; then
+      echo "$DETECTED"
+      return 0
+    fi
+  fi
+  echo ""
+}
+
+cmd_list() {
+  echo ""
+  echo "模型路由规则"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  printf "  %-30s %-35s %s\n" "阶段" "强制模型" "允许降级"
+  echo "───────────────────────────────────────────────────"
+  for STAGE in $(echo "${!REQUIRED_MODELS[@]}" | tr ' ' '\n' | sort); do
+    local REQ="${REQUIRED_MODELS[$STAGE]}"
+    local DW="${ALLOWED_DOWNGRADES[$STAGE]}"
+    printf "  %-30s %-35s %s\n" "$STAGE" "$REQ" "${DW:--}"
+  done
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+}
+
+cmd_check() {
+  local STAGE=""
+  local CURRENT_MODEL=""
+  local FORCE=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model)
+        CURRENT_MODEL="$2"
+        shift 2
+        ;;
+      --force)
+        FORCE=1
+        shift
+        ;;
+      --help|-h)
+        echo "用法: autowrite-model-gate check <步骤> [--model <模型>] [--force]"
+        return 0
+        ;;
+      *)
+        if [[ -z "$STAGE" ]]; then
+          STAGE="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$STAGE" ]]; then
+    echo "[✗] 请提供审计步骤名" >&2
+    echo "可用步骤: ${!REQUIRED_MODELS[*]}" >&2
+    return 1
+  fi
+
+  local REQ_MODEL="${REQUIRED_MODELS[$STAGE]:-}"
+  if [[ -z "$REQ_MODEL" ]]; then
+    echo "[!] 未知步骤: $STAGE"
+    echo "可用步骤: ${!REQUIRED_MODELS[*]}"
+    return 1
+  fi
+
+  if [[ -z "$CURRENT_MODEL" ]]; then
+    CURRENT_MODEL="$(detect_current_model)"
+  fi
+
+  if [[ -z "$CURRENT_MODEL" ]]; then
+    if [[ $FORCE -eq 1 ]]; then
+      echo "[⚠] 无法检测当前模型，--force 强制放行"
+      echo "  要求: $REQ_MODEL"
+      echo "  实际: 未知"
+      return 0
+    fi
+    echo "[✗] 无法检测当前模型" >&2
+    echo "  要求: $REQ_MODEL"
+    echo "  设置环境变量 AUTOWRITE_CURRENT_MODEL 或使用 --model <模型名>"
+    echo "  或使用 --force 强制放行（质量风险自担）"
+    return 1
+  fi
+
+  if [[ "$CURRENT_MODEL" == "$REQ_MODEL" ]]; then
+    echo "[✓] 模型正确: $CURRENT_MODEL"
+    return 0
+  fi
+
+  local DOWNGRADES="${ALLOWED_DOWNGRADES[$STAGE]:-}"
+  if [[ -n "$DOWNGRADES" ]]; then
+    local IFS=','
+    for DW in $DOWNGRADES; do
+      if [[ "$CURRENT_MODEL" == "$DW" ]]; then
+        echo "[⚠] 模型降级: $REQ_MODEL → $CURRENT_MODEL"
+        return 2
+      fi
+    done
+  fi
+
+  if [[ $FORCE -eq 1 ]]; then
+    echo "[⚠] 模型不符，--force 强制放行" >&2
+    echo "  要求: $REQ_MODEL" >&2
+    echo "  实际: $CURRENT_MODEL" >&2
+    echo "  质量风险: 高" >&2
+    return 0
+  fi
+
+  echo "[✗] 模型阻断: 阶段[$STAGE]必须使用[$REQ_MODEL]，当前[$CURRENT_MODEL]" >&2
+  echo "  允许的降级: ${DOWNGRADES:-无}" >&2
+  echo "  如需绕过: --force（记录到 workflow-deviations.md）" >&2
+  return 1
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  SUBCMD="${1:-}"
+  shift 2>/dev/null || true
+
+  case "$SUBCMD" in
+    check) cmd_check "$@" ;;
+    list)  cmd_list "$@" ;;
+    *)
+      echo "用法: autowrite-model-gate <check|list> [选项]"
+      echo ""
+      echo "命令:"
+      echo "  check <步骤> [--model <模型>] [--force]  检查模型合规性"
+      echo "  list                                     列出所有模型规则"
+      ;;
+  esac
+fi

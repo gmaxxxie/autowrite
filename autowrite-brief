@@ -1,0 +1,425 @@
+#!/bin/bash
+# autowrite-brief - 章节预写协商（角色 Skill 讨论分析）
+# 用法:
+#   autowrite brief <书名> <章节>              章节预写协商
+#   autowrite brief <书名> --init              初始化角色体系（persona-research.md）
+#   autowrite brief <书名> --direction         方向期协商（书成型前）
+#   autowrite brief <书名> --status            查看协商进度
+#
+# 角色协商流程:
+#   1. 读取 persona-research.md 获取角色配置
+#   2. 加载对应角色 Skills（nuwa-skill/examples/）
+#   3. 每个角色回答引导问题
+#   4. 输出 ch##-{slug}-brief.md（含角色共识）
+
+set -e
+
+: "${AUTOWRITE_ROOT:=/home/max/AutoWriteO}"
+: "${BOOKS_DIR:=/home/max/books}"
+
+find_book_dir() {
+  local BOOK_NAME="$1"
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ -d "$BOOK_DIR" ]]; then
+    echo "$BOOK_DIR"
+    return 0
+  fi
+  local CURRENT="$PWD"
+  while [[ "$CURRENT" != "/" ]]; do
+    if [[ -f "$CURRENT/book.conf" ]]; then
+      echo "$CURRENT"
+      return 0
+    fi
+    CURRENT="$(dirname "$CURRENT")"
+  done
+  return 1
+}
+
+conf_val() {
+  local CONF="$1"
+  local KEY="$2"
+  grep "^${KEY}=" "$CONF" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^\"//;s/\"$//" | sed "s/^'//;s/'$//"
+}
+
+detect_genre_for_personas() {
+  local BOOK_DIR="$1"
+  local CONF="$BOOK_DIR/book.conf"
+  local GENRE
+  GENRE="$(conf_val "$CONF" GENRE)"
+
+  local BOOK_TITLE
+  BOOK_TITLE="$(conf_val "$CONF" BOOK_NAME)"
+
+  if [[ "$GENRE" == *"教育"* ]] || [[ "$GENRE" == *"亲子"* ]] || [[ "$BOOK_TITLE" == *"家长"* ]] || [[ "$BOOK_TITLE" == *"孩子"* ]] || [[ "$BOOK_TITLE" == *"AI课"* ]]; then
+    echo "AI教育亲子"
+  elif [[ "$GENRE" == *"商业"* ]] || [[ "$GENRE" == *"职场"* ]] || [[ "$BOOK_TITLE" == *"营销"* ]] || [[ "$BOOK_TITLE" == *"增长"* ]]; then
+    echo "AI商业/职场"
+  elif [[ "$GENRE" == *"投资"* ]] || [[ "$GENRE" == *"金融"* ]]; then
+    echo "AI投资/金融"
+  elif [[ "$GENRE" == *"创业"* ]]; then
+    echo "创业者/创业"
+  elif [[ "$GENRE" == *"产品"* ]]; then
+    echo "产品经理"
+  else
+    echo "AI商业/职场"
+  fi
+}
+
+get_persona_config() {
+  local BOOK_TYPE="$1"
+  case "$BOOK_TYPE" in
+    "AI教育亲子")
+      echo "jane-nelsen-perspective,feynman-perspective,ilya-sutskever-perspective,andrej-karpathy-perspective,parent-reader-composite"
+      ;;
+    "AI商业/职场")
+      echo "feynman-perspective,ilya-sutskever-perspective,andrej-karpathy-perspective,naval-perspective"
+      ;;
+    "AI投资/金融")
+      echo "feynman-perspective,ilya-sutskever-perspective,andrej-karpathy-perspective,munger-perspective"
+      ;;
+    "创业者/创业")
+      echo "feynman-perspective,ilya-sutskever-perspective,andrej-karpathy-perspective,paul-graham-perspective"
+      ;;
+    "产品经理")
+      echo "steve-jobs-perspective,feynman-perspective,ilya-sutskever-perspective,andrej-karpathy-perspective,elon-musk-perspective"
+      ;;
+    "育儿/亲子")
+      echo "jane-nelsen-perspective,feynman-perspective,parent-reader-composite"
+      ;;
+    *)
+      echo "feynman-perspective,ilya-sutskever-perspective,andrej-karpathy-perspective"
+      ;;
+  esac
+}
+
+check_persona_skills() {
+  local CONFIG="$1"
+  local NORMA_DIR="/home/max/.hermes/skills/nuwa-skill/examples"
+  local MISSING=()
+  local PRESENT=()
+
+  local IFS=','
+  for SKILL in $CONFIG; do
+    if [[ -d "$NORMA_DIR/$SKILL" ]]; then
+      PRESENT+=("$SKILL")
+    else
+      MISSING+=("$SKILL")
+    fi
+  done
+
+  echo "PRESENT=${PRESENT[*]}"
+  echo "MISSING=${MISSING[*]}"
+}
+
+show_brief_status() {
+  local BOOK_DIR="$1"
+  local BNAME
+  BNAME="$(conf_val "$BOOK_DIR/book.conf" BOOK_NAME)"
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  $BNAME — 角色协商进度"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  local PR_FILE="$BOOK_DIR/00-index/persona-research.md"
+  if [[ -f "$PR_FILE" ]]; then
+    echo -e "  ✓ persona-research.md 已创建"
+  else
+    echo -e "  ✗ persona-research.md 未创建"
+    echo "    执行: autowrite brief \"$BNAME\" --init"
+    echo ""
+    return
+  fi
+
+  local BRIEF_DIR="$BOOK_DIR/00-index/chapter-pre-write"
+  local DRAFT_DIR
+  for d in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-章节草稿" "$BOOK_DIR/05-chapter-drafts"; do
+    if [[ -d "$d" ]]; then DRAFT_DIR="$d"; break; fi
+  done
+
+  echo ""
+  echo "  章节预写 Brief 状态："
+  echo ""
+
+  local CHAPTERS=()
+  if [[ -d "$DRAFT_DIR" ]]; then
+    for f in "$DRAFT_DIR"/ch*.md; do
+      if [[ -f "$f" ]]; then
+        local BN
+        BN="$(basename "$f")"
+        case "$BN" in
+          *quality*|*de-ai*|*auto-revisor*|*tickets*|*report*|*cn-localization*|*persona*) continue ;;
+        esac
+        CHAPTERS+=("${BN%.md}")
+      fi
+    done
+  fi
+
+  if [[ ${#CHAPTERS[@]} -eq 0 ]]; then
+    echo "    暂无章节草稿"
+  else
+    for ch in "${CHAPTERS[@]}"; do
+      local BRIEF_FOUND="✗"
+      if [[ -d "$BRIEF_DIR" ]]; then
+        for bf in "$BRIEF_DIR/${ch}"*-brief.md; do
+          if [[ -f "$bf" ]]; then
+            BRIEF_FOUND="✓"
+            break
+          fi
+        done
+      fi
+      echo "    [$BRIEF_FOUND] $ch"
+    done
+  fi
+  echo ""
+}
+
+cmd_brief() {
+  local BOOK_NAME=""
+  local CHAPTER=""
+  local DO_INIT=0
+  local DO_DIRECTION=0
+  local DO_STATUS=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --init)
+        DO_INIT=1
+        shift
+        ;;
+      --direction)
+        DO_DIRECTION=1
+        shift
+        ;;
+      --status)
+        DO_STATUS=1
+        shift
+        ;;
+      --help|-h)
+        cat << 'EOF'
+用法:
+  autowrite brief <书名> <章节>        章节预写协商
+  autowrite brief <书名> --init        初始化角色体系
+  autowrite brief <书名> --direction   方向期协商
+  autowrite brief <书名> --status      查看协商进度
+
+章节格式: ch01, ch05 等
+
+示例:
+  autowrite brief "AI教育" ch03
+  autowrite brief "AI教育" --init
+  autowrite brief "AI教育" --status
+EOF
+        return 0
+        ;;
+      ch*|第*章*)
+        if [[ -z "$CHAPTER" ]]; then
+          CHAPTER="$1"
+        fi
+        shift
+        ;;
+      *)
+        if [[ -z "$BOOK_NAME" ]]; then
+          BOOK_NAME="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$BOOK_NAME" ]]; then
+    echo "[✗] 请提供书名" >&2
+    return 1
+  fi
+
+  local BOOK_DIR
+  BOOK_DIR="$(find_book_dir "$BOOK_NAME")" || {
+    echo "[✗] 找不到书籍: $BOOK_NAME" >&2
+    return 1
+  }
+
+  if [[ $DO_STATUS -eq 1 ]]; then
+    show_brief_status "$BOOK_DIR"
+    return 0
+  fi
+
+  local BNAME
+  BNAME="$(conf_val "$BOOK_DIR/book.conf" BOOK_NAME)"
+  local BOOK_TYPE
+  BOOK_TYPE="$(detect_genre_for_personas "$BOOK_DIR")"
+  local PERSONA_CONFIG
+  PERSONA_CONFIG="$(get_persona_config "$BOOK_TYPE")"
+
+  if [[ $DO_INIT -eq 1 ]]; then
+    local PR_FILE="$BOOK_DIR/00-index/persona-research.md"
+    if [[ -f "$PR_FILE" ]]; then
+      echo "[!] persona-research.md 已存在: $PR_FILE"
+      return 0
+    fi
+
+    local SKILL_CHECK
+    SKILL_CHECK="$(check_persona_skills "$PERSONA_CONFIG")"
+    local PRESENT_SKILLS
+    PRESENT_SKILLS="$(echo "$SKILL_CHECK" | grep '^PRESENT=' | cut -d= -f2-)"
+    local MISSING_SKILLS
+    MISSING_SKILLS="$(echo "$SKILL_CHECK" | grep '^MISSING=' | cut -d= -f2-)"
+
+    mkdir -p "$BOOK_DIR/00-index"
+
+    local PERSONA_TABLE=""
+    local IFS_OLD="$IFS"
+    IFS=' '
+    for s in $PRESENT_SKILLS; do
+      case "$s" in
+        jane-nelsen*) PERSONA_TABLE="${PERSONA_TABLE}| 教育专家 | 简·尼尔森 | 评估方法论科学性 | ✅ 已有 |
+" ;;
+        feynman*) PERSONA_TABLE="${PERSONA_TABLE}| 理解专家 | 费曼 | 检验概念可理解性 | ✅ 已有 |
+" ;;
+        ilya*) PERSONA_TABLE="${PERSONA_TABLE}| AI专家 | Ilya | 检验AI边界准确性 | ✅ 已有 |
+" ;;
+        karpathy*) PERSONA_TABLE="${PERSONA_TABLE}| AI实践者 | Karpathy | 检验Prompt可行性 | ✅ 已有 |
+" ;;
+        parent-reader*) PERSONA_TABLE="${PERSONA_TABLE}| 家长读者 | 复合角色 | 目标读者第一视角 | ✅ 已有 |
+" ;;
+        naval*) PERSONA_TABLE="${PERSONA_TABLE}| 商业专家 | Naval | 商业判断力 | ✅ 已有 |
+" ;;
+        munger*) PERSONA_TABLE="${PERSONA_TABLE}| 投资专家 | Munger | 投资决策智慧 | ✅ 已有 |
+" ;;
+        paul-graham*) PERSONA_TABLE="${PERSONA_TABLE}| 创业专家 | Paul Graham | 创业方法论 | ✅ 已有 |
+" ;;
+        elon-musk*) PERSONA_TABLE="${PERSONA_TABLE}| 产品专家 | Musk | 产品远见 | ✅ 已有 |
+" ;;
+        steve-jobs*) PERSONA_TABLE="${PERSONA_TABLE}| 设计专家 | Jobs | 用户体验 | ✅ 已有 |
+" ;;
+        *) PERSONA_TABLE="${PERSONA_TABLE}| 角色专家 | ${s} | 专业评审 | ✅ 已有 |
+" ;;
+      esac
+    done
+    IFS="$IFS_OLD"
+
+    local GAP_INFO="无"
+    if [[ -n "$MISSING_SKILLS" ]]; then
+      GAP_INFO="$MISSING_SKILLS"
+    fi
+
+    cat > "$PR_FILE" << EOF
+# 角色体系研究报告
+
+## 项目信息
+- 书名：$BNAME
+- 目标读者：（待补充）
+- 书籍类型：$BOOK_TYPE
+
+## 所需角色配置
+
+| 角色 | 视角 | 职责 | Skill状态 |
+|------|------|------|----------|
+${PERSONA_TABLE}
+## 角色缺口
+${GAP_INFO}
+
+## 角色协商流程
+每章写作前执行 \$book-persona-research 的 § 章节预写流程。
+
+## 章节预写状态
+| 章节 | 状态 | Brief文件 |
+|------|------|----------|
+| — | 待协商 | — |
+
+## 下一步
+执行: autowrite brief "$BNAME" ch01
+EOF
+
+    echo "[✓] persona-research.md 已创建: $PR_FILE"
+    echo ""
+    echo "角色配置: $BOOK_TYPE"
+    echo "可用角色: $(echo "$PRESENT_SKILLS" | tr ' ' ', ')"
+    if [[ -n "$MISSING_SKILLS" ]]; then
+      echo "缺失角色: $MISSING_SKILLS（可用 \$nuwa-skill 创建）"
+    fi
+    echo ""
+    echo "下一步: autowrite brief \"$BNAME\" ch01"
+    return 0
+  fi
+
+  if [[ $DO_DIRECTION -eq 1 ]]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  方向期协商: $BNAME"
+    echo "  书籍类型: $BOOK_TYPE"
+    echo "  参与角色: $(echo "$PERSONA_CONFIG" | tr ',' ', ')"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "请对 Hermes agent 说:"
+    echo "  用 \$book-persona-research 对 $BNAME 做方向期协商"
+    echo ""
+    echo "Hermes 将执行:"
+    echo "  1. 加载角色 Skills"
+    echo "  2. 每个角色回答方向期引导问题"
+    echo "  3. 输出 00-index/book-direction-brief.md"
+    echo ""
+    return 0
+  fi
+
+  if [[ -z "$CHAPTER" ]]; then
+    echo "[✗] 请提供章节号" >&2
+    echo "用法: autowrite brief <书名> <章节>" >&2
+    echo "示例: autowrite brief \"$BNAME\" ch03" >&2
+    return 1
+  fi
+
+  local PR_FILE="$BOOK_DIR/00-index/persona-research.md"
+  if [[ ! -f "$PR_FILE" ]]; then
+    echo "[!] persona-research.md 未创建 — 先执行初始化:"
+    echo "    autowrite brief \"$BNAME\" --init"
+    return 1
+  fi
+
+  local CH_NUM="${CHAPTER#ch}"
+  CH_NUM="${CH_NUM#0}"
+
+  local BRIEF_DIR="$BOOK_DIR/00-index/chapter-pre-write"
+  local BRIEF_FILE=""
+  if [[ -d "$BRIEF_DIR" ]]; then
+    for bf in "$BRIEF_DIR/${CHAPTER}"*-brief.md; do
+      if [[ -f "$bf" ]]; then
+        BRIEF_FILE="$bf"
+        break
+      fi
+    done
+  fi
+
+  if [[ -n "$BRIEF_FILE" ]]; then
+    echo "[!] $CHAPTER 已有预写 Brief: $BRIEF_FILE"
+    echo "如需重新协商，先删除旧文件:"
+    echo "  rm \"$BRIEF_FILE\""
+    echo ""
+    echo "然后重新执行:"
+    echo "  autowrite brief \"$BNAME\" $CHAPTER"
+    return 0
+  fi
+
+  mkdir -p "$BRIEF_DIR"
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  章节预写协商: $BNAME — $CHAPTER"
+  echo "  书籍类型: $BOOK_TYPE"
+  echo "  参与角色: $(echo "$PERSONA_CONFIG" | tr ',' ', ')"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "请对 Hermes agent 说:"
+  echo "  用 \$book-persona-research 对 $BNAME 的 $CHAPTER 做章节预写协商"
+  echo ""
+  echo "Hermes 将执行:"
+  echo "  1. 读取 book-structure.md 获取本章大纲"
+  echo "  2. 加载角色 Skills（$(echo "$PERSONA_CONFIG" | tr ',' '、')）"
+  echo "  3. 每个角色回答引导问题"
+  echo "  4. 记录分歧点和共识点"
+  echo "  5. 输出 $BRIEF_DIR/${CHAPTER}-brief.md"
+  echo ""
+  echo "协商完成后继续写作:"
+  echo "  autowrite write next \"$BNAME\""
+  echo ""
+}

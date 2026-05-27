@@ -1,0 +1,359 @@
+#!/bin/bash
+# autowrite-audit - 审计链 CLI 入口
+# 用法:
+#   autowrite audit <书名> [章节] [--step <步骤>]
+#   autowrite audit <书名> --chain    完整审计链
+#
+# 审计链步骤（按顺序）:
+#   auto-revisor → quality-audit → de-ai-audit → cn-localization → persona-audit
+
+: "${AUTOWRITE_ROOT:=/home/max/AutoWriteO}"
+MODEL_GATE="$AUTOWRITE_ROOT/scripts/autowrite-model-gate"
+STATE_TOOL="$AUTOWRITE_ROOT/scripts/autowrite-state"
+
+find_book_dir() {
+  local BOOK_NAME="$1"
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ -d "$BOOK_DIR" ]]; then
+    echo "$BOOK_DIR"
+    return 0
+  fi
+  local CURRENT="$PWD"
+  while [[ "$CURRENT" != "/" ]]; do
+    if [[ -f "$CURRENT/book.conf" ]]; then
+      echo "$CURRENT"
+      return 0
+    fi
+    CURRENT="$(dirname "$CURRENT")"
+  done
+  return 1
+}
+
+conf_val() {
+  local CONF="$1"
+  local KEY="$2"
+  grep "^${KEY}=" "$CONF" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^\"//;s/\"$//" | sed "s/^'//;s/'$//"
+}
+
+detect_draft_dir() {
+  local BOOK_DIR="$1"
+  for d in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-章节草稿/EN" "$BOOK_DIR/05-章节草稿" "$BOOK_DIR/05-chapter-drafts"; do
+    if [[ -d "$d" ]]; then
+      echo "$d"
+      return 0
+    fi
+  done
+  echo "$BOOK_DIR/05-章节草稿/CN"
+  return 1
+}
+
+AUDIT_STEPS=(
+  "auto-revisor:book-auto-revisor:minimax-m2.7"
+  "quality-audit:book-chapter-quality-audit:glm-5.1"
+  "de-ai-audit:book-de-ai-audit:glm-5.1"
+  "cn-localization:book-cn-localization-audit:minimax-m2.7"
+  "persona-audit:book-persona-audit:glm-5.1"
+)
+
+step_index() {
+  local STEP="$1"
+  for i in "${!AUDIT_STEPS[@]}"; do
+    local NAME="${AUDIT_STEPS[$i]%%:*}"
+    if [[ "$NAME" == "$STEP" ]]; then
+      echo "$i"
+      return 0
+    fi
+  done
+  echo "-1"
+  return 1
+}
+
+step_name()  { echo "${1%%:*}"; }
+step_skill() { local s="${1#*:}"; echo "${s%%:*}"; }
+step_model() { echo "${1##*:}"; }
+
+show_audit_usage() {
+  cat << 'EOF'
+用法:
+  autowrite audit <书名> [章节]              从下一缺失步骤开始审计
+  autowrite audit <书名> [章节] --chain      完整审计链（所有5步）
+  autowrite audit <书名> [章节] --step <步骤> 指定步骤
+  autowrite audit <书名> [章节] --status     查看审计进度
+
+步骤:
+  auto-revisor    自动诊断+修复（minimax-m2.7）
+  quality-audit   结构/创意/深度三维审计（glm-5.1）
+  de-ai-audit     去AI味审计（glm-5.1）
+  cn-localization 中文本地化审计（minimax-m2.7）
+  persona-audit   8路虚拟人物评审（glm-5.1）
+
+示例:
+  autowrite audit "AI教育"
+  autowrite audit "AI教育" ch03
+  autowrite audit "AI教育" ch03 --step de-ai-audit
+  autowrite audit "AI教育" --chain
+EOF
+}
+
+detect_last_completed_step() {
+  local DRAFT_DIR="$1"
+  local CHAPTER="$2"
+  local LAST=-1
+
+  for i in "${!AUDIT_STEPS[@]}"; do
+    local NAME
+    NAME="$(step_name "${AUDIT_STEPS[$i]}")"
+    local FOUND=0
+    case "$NAME" in
+      auto-revisor)
+        if ls "$DRAFT_DIR/${CHAPTER}"*auto-revisor-report*.md 2>/dev/null | grep -q .; then FOUND=1; fi
+        ;;
+      quality-audit)
+        if ls "$DRAFT_DIR/${CHAPTER}"*quality-tickets*.md 2>/dev/null | grep -q .; then FOUND=1; fi
+        ;;
+      de-ai-audit)
+        if ls "$DRAFT_DIR/${CHAPTER}"*de-ai-tickets*.md 2>/dev/null | grep -q .; then FOUND=1; fi
+        ;;
+      cn-localization)
+        if ls "$DRAFT_DIR/${CHAPTER}"*cn-localization-tickets*.md 2>/dev/null | grep -q .; then FOUND=1; fi
+        ;;
+      persona-audit)
+        if ls "$DRAFT_DIR/${CHAPTER}"*persona-audit*.md 2>/dev/null | grep -q .; then FOUND=1; fi
+        ;;
+    esac
+    if [[ $FOUND -eq 1 ]]; then
+      LAST=$i
+    fi
+  done
+  echo "$LAST"
+}
+
+show_audit_status() {
+  local BOOK_DIR="$1"
+  local CHAPTER="$2"
+  local DRAFT_DIR
+  DRAFT_DIR="$(detect_draft_dir "$BOOK_DIR")"
+  local BNAME
+  BNAME="$(conf_val "$BOOK_DIR/book.conf" BOOK_NAME)"
+
+  echo ""
+  echo "============================================"
+  echo -e "  ${BLUE}${BNAME}${NC} — 审计进度"
+  echo "============================================"
+  echo ""
+
+  local CHAPTERS=()
+  if [[ -n "$CHAPTER" ]]; then
+    CHAPTERS=("$CHAPTER")
+  else
+    if [[ -d "$DRAFT_DIR" ]]; then
+      for f in "$DRAFT_DIR"/ch*.md; do
+        if [[ -f "$f" ]]; then
+          local BN
+          BN="$(basename "$f")"
+          case "$BN" in
+            *quality*|*de-ai*|*auto-revisor*|*tickets*|*report*|*cn-localization*|*persona*) continue ;;
+          esac
+          CHAPTERS+=("${BN%.md}")
+        fi
+      done
+    fi
+  fi
+
+  if [[ ${#CHAPTERS[@]} -eq 0 ]]; then
+    echo "  暂无章节草稿"
+    return
+  fi
+
+  for ch in "${CHAPTERS[@]}"; do
+    echo -e "  ${GREEN}${ch}${NC}"
+    for i in "${!AUDIT_STEPS[@]}"; do
+      local NAME
+      NAME="$(step_name "${AUDIT_STEPS[$i]}")"
+      local MARK=" "
+      case "$NAME" in
+        auto-revisor)
+          if ls "$DRAFT_DIR/${ch}"*auto-revisor-report*.md 2>/dev/null | grep -q .; then MARK="✓"; fi
+          ;;
+        quality-audit)
+          if ls "$DRAFT_DIR/${ch}"*quality-tickets*.md 2>/dev/null | grep -q .; then MARK="✓"; fi
+          ;;
+        de-ai-audit)
+          if ls "$DRAFT_DIR/${ch}"*de-ai-tickets*.md 2>/dev/null | grep -q .; then MARK="✓"; fi
+          ;;
+        cn-localization)
+          if ls "$DRAFT_DIR/${ch}"*cn-localization-tickets*.md 2>/dev/null | grep -q .; then MARK="✓"; fi
+          ;;
+        persona-audit)
+          if ls "$DRAFT_DIR/${ch}"*persona-audit*.md 2>/dev/null | grep -q .; then MARK="✓"; fi
+          ;;
+      esac
+      local MODEL
+      MODEL="$(step_model "${AUDIT_STEPS[$i]}")"
+      echo "    [$MARK] $NAME ($MODEL)"
+    done
+    echo ""
+  done
+}
+
+cmd_audit() {
+  local BOOK_NAME=""
+  local CHAPTER=""
+  local STEP=""
+  local DO_CHAIN=0
+  local DO_STATUS=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --chain)
+        DO_CHAIN=1
+        shift
+        ;;
+      --step)
+        STEP="$2"
+        shift 2
+        ;;
+      --status)
+        DO_STATUS=1
+        shift
+        ;;
+      --help|-h)
+        show_audit_usage
+        return 0
+        ;;
+      ch*|第*章*)
+        if [[ -z "$CHAPTER" ]]; then
+          CHAPTER="$1"
+        fi
+        shift
+        ;;
+      *)
+        if [[ -z "$BOOK_NAME" ]]; then
+          BOOK_NAME="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "请提供书名"
+    show_audit_usage
+    return 1
+  fi
+
+  local BOOK_DIR
+  BOOK_DIR="$(find_book_dir "$BOOK_NAME")" || {
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  }
+
+  local DRAFT_DIR
+  DRAFT_DIR="$(detect_draft_dir "$BOOK_DIR")"
+
+  if [[ $DO_STATUS -eq 1 ]]; then
+    show_audit_status "$BOOK_DIR" "$CHAPTER"
+    return 0
+  fi
+
+  local START_IDX=0
+
+  if [[ -n "$STEP" ]]; then
+    local IDX
+    IDX="$(step_index "$STEP")" || {
+      error "未知审计步骤: $STEP"
+      echo "可用步骤: auto-revisor, quality-audit, de-ai-audit, cn-localization, persona-audit"
+      return 1
+    }
+    START_IDX=$IDX
+  elif [[ $DO_CHAIN -eq 0 ]]; then
+    if [[ -n "$CHAPTER" ]]; then
+      local LAST
+      LAST="$(detect_last_completed_step "$DRAFT_DIR" "$CHAPTER")"
+      START_IDX=$((LAST + 1))
+    fi
+  fi
+
+  if [[ $START_IDX -ge ${#AUDIT_STEPS[@]} ]]; then
+    success "所有审计步骤已完成"
+    return 0
+  fi
+
+  # 审计链顺序强制：前置步骤必须完成
+  if [[ -n "$CHAPTER" ]] && [[ -f "$STATE_TOOL" ]]; then
+    local PREV_STEP_NAME
+    PREV_STEP_NAME="$(step_name "${AUDIT_STEPS[$START_IDX]}")"
+    if [[ $START_IDX -gt 0 ]]; then
+      local REQUIRED_STEP
+      REQUIRED_STEP="$(step_name "${AUDIT_STEPS[$((START_IDX - 1))]}")"
+      python3 "$STATE_TOOL" check-audit-chain "$BOOK_DIR" "$CHAPTER" >/dev/null 2>&1 || {
+        error "$CHAPTER 的 $REQUIRED_STEP 未完成 — 不能跳到 $PREV_STEP_NAME"
+        echo "  先完成: autowrite audit \"$BOOK_NAME\" $CHAPTER --step $REQUIRED_STEP" >&2
+        return 1
+      }
+    fi
+  fi
+
+  local BNAME
+  BNAME="$(conf_val "$BOOK_DIR/book.conf" BOOK_NAME)"
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  审计链启动"
+  echo "  书籍: $BNAME"
+  if [[ -n "$CHAPTER" ]]; then
+    echo "  章节: $CHAPTER"
+  else
+    echo "  范围: 全部章节"
+  fi
+  echo "  起始步骤: $(step_name "${AUDIT_STEPS[$START_IDX]}")"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  for (( i=START_IDX; i<${#AUDIT_STEPS[@]}; i++ )); do
+    local NAME
+    NAME="$(step_name "${AUDIT_STEPS[$i]}")"
+    local SKILL
+    SKILL="$(step_skill "${AUDIT_STEPS[$i]}")"
+    local MODEL
+    MODEL="$(step_model "${AUDIT_STEPS[$i]}")"
+
+    echo -e "${YELLOW}[$((i+1))/${#AUDIT_STEPS[@]}]${NC} $NAME"
+    echo "  Skill: \$$SKILL"
+    echo "  模型: $MODEL"
+
+    if [[ -x "$MODEL_GATE" ]]; then
+      local GATE_RESULT
+      GATE_RESULT="$("$MODEL_GATE" check "$SKILL" --model "${AUTOWRITE_CURRENT_MODEL:-}" 2>&1)" || {
+        local GATE_EXIT=$?
+        if [[ $GATE_EXIT -eq 1 ]]; then
+          echo "  ⚠️ 模型门禁: $GATE_RESULT"
+        elif [[ $GATE_EXIT -eq 2 ]]; then
+          echo "  ⚠️ 模型降级: $GATE_RESULT"
+        fi
+      }
+    fi
+    echo ""
+
+    if [[ $DO_CHAIN -eq 0 ]]; then
+      echo "执行下一步审计，请对 Hermes agent 说:"
+      if [[ -n "$CHAPTER" ]]; then
+        echo "  审计 $BNAME 的 $CHAPTER — 执行 $NAME"
+      else
+        echo "  审计 $BNAME — 执行 $NAME"
+      fi
+      echo ""
+      echo "如需执行完整审计链，使用:"
+      echo "  autowrite audit \"$BOOK_NAME\" --chain"
+      return 0
+    fi
+
+    echo "  → 路由到 \$$SKILL (模型: $MODEL)"
+    echo ""
+  done
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo -e "  ${GREEN}审计链规划完成${NC}"
+  echo "  请依次对 Hermes agent 执行上述步骤"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}

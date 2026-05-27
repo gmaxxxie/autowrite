@@ -1,0 +1,55 @@
+#!/bin/bash
+# autowrite-cron - 守护进程 cron 管理
+# 用法: autowrite-cron <install|uninstall|run|status>
+
+AUTOWRITE_ROOT="${AUTOWRITE_ROOT:-/home/max/AutoWriteO}"
+CRON_CONFIG="$AUTOWRITE_ROOT/scripts/autowrite-cron-config"
+CRON_MARKER="# AUTOWRITE-CRON-MANAGED"
+
+cmd_install() {
+  echo "安装 AutoWriteO cron 任务..."
+  python3 "$CRON_CONFIG" list | while read -r line; do
+    echo "  $line"
+  done
+  echo ""
+  echo "手动添加 cron 任务:"
+  echo "  python3 $CRON_CONFIG add <书名> '<schedule>'"
+  echo ""
+  echo "安装到系统 crontab:"
+  echo "  (crontab -l 2>/dev/null; echo '$CRON_MARKER'; echo '0 9 * * * $AUTOWRITE_ROOT/scripts/autowrite-cron run') | crontab -"
+}
+
+cmd_uninstall() {
+  echo "移除 AutoWriteO cron 任务..."
+  crontab -l 2>/dev/null | grep -v "$CRON_MARKER" | grep -v "autowrite-cron run" | crontab -
+  echo "✓ 已移除"
+}
+
+cmd_run() {
+  python3 "$CRON_CONFIG" list | while IFS= read -r line; do
+    BOOK_NAME=$(echo "$line" | awk '{print $2}')
+    ACTION=$(echo "$line" | awk '{print $4}')
+    if [[ -n "$BOOK_NAME" ]]; then
+      echo "[$(date)] 运行: $BOOK_NAME $ACTION"
+      autowrite write next "$BOOK_NAME" && \
+        "$AUTOWRITE_ROOT/scripts/autowrite-notify" "$BOOK_NAME" success || \
+        "$AUTOWRITE_ROOT/scripts/autowrite-notify" "$BOOK_NAME" failure
+    fi
+  done
+}
+
+cmd_status() {
+  echo "AutoWriteO Cron 状态:"
+  python3 "$CRON_CONFIG" list
+  echo ""
+  echo "系统 crontab:"
+  crontab -l 2>/dev/null | grep -A1 "$CRON_MARKER" || echo "  (未安装)"
+}
+
+case "${1:-}" in
+  install)   cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  run)       cmd_run ;;
+  status)    cmd_status ;;
+  *)         echo "用法: autowrite-cron <install|uninstall|run|status>"; exit 1 ;;
+esac

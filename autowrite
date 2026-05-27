@@ -1,0 +1,567 @@
+#!/bin/bash
+# autowrite - AutoWriteO CLI 入口
+# 用法: autowrite <command> [options]
+#
+# 命令:
+#   init           初始化书籍工作区 + 真相文件
+#   write next     完整管道：规划→草稿→审计→修订
+#   plan           生成章节规划
+#   draft          只写草稿
+#   audit          审计章节
+#   revise         修订章节
+#   status         查看书籍状态
+#   list           列出所有书籍
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${AUTOWRITE_ROOT:=$(dirname "$SCRIPT_DIR")}"
+: "${BOOKS_DIR:=$HOME/books}"
+export BOOKS_DIR
+
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+info() { echo -e "${BLUE}[autowrite]${NC} $1"; }
+success() { echo -e "${GREEN}[✓]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!]${NC} $1"; }
+error() { echo -e "${RED}[✗]${NC} $1" >&2; }
+
+# 加载子命令
+source "$SCRIPT_DIR/autowrite-init"
+source "$SCRIPT_DIR/autowrite-write"
+source "$SCRIPT_DIR/autowrite-status"
+source "$SCRIPT_DIR/autowrite-plan"
+source "$SCRIPT_DIR/autowrite-audit"
+source "$SCRIPT_DIR/autowrite-validate"
+source "$SCRIPT_DIR/autowrite-brief"
+
+STATE_TOOL="$AUTOWRITE_ROOT/scripts/autowrite-state"
+
+# 占位子命令（通过 Hermes skill 路由执行）
+cmd_draft() {
+  local BOOK_NAME="${1:-}"
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "请提供书名"
+    echo "用法: autowrite draft <书名>"
+    return 1
+  fi
+  info "草稿写作通过 skill 路由执行"
+  info "请对 Hermes agent 说: 写 $BOOK_NAME 的下一章"
+  info "或者: autowrite write next $BOOK_NAME"
+}
+
+cmd_revise() {
+  local BOOK_NAME="${1:-}"
+  local CHAPTER="${2:-}"
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "请提供书名"
+    echo "用法: autowrite revise <书名> [章节]"
+    return 1
+  fi
+
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  章节修订: $BOOK_NAME"
+  if [[ -n "$CHAPTER" ]]; then
+    echo "  章节: $CHAPTER"
+  fi
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  # 检查是否有未关闭的审计 ticket
+  local DRAFT_DIR
+  for d in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-章节草稿/EN" "$BOOK_DIR/05-章节草稿" "$BOOK_DIR/05-chapter-drafts"; do
+    if [[ -d "$d" ]]; then DRAFT_DIR="$d"; break; fi
+  done
+
+  local TICKETS_FOUND=0
+  if [[ -n "$DRAFT_DIR" ]]; then
+    local PATTERN="${CHAPTER:-ch}*"
+    for tf in "$DRAFT_DIR"/$PATTERN*tickets*.md; do
+      if [[ -f "$tf" ]]; then
+        TICKETS_FOUND=$((TICKETS_FOUND + 1))
+        local BN
+        BN="$(basename "$tf")"
+        echo "  发现 ticket: $BN"
+      fi
+    done
+  fi
+
+  if [[ $TICKETS_FOUND -eq 0 ]]; then
+    echo "  ⚠️ 未发现审计 ticket — 修订需要有 ticket 驱动"
+    echo "  先执行: autowrite audit \"$BOOK_NAME\""
+  fi
+
+  echo ""
+  echo "对 Hermes agent 说:"
+  if [[ -n "$CHAPTER" ]]; then
+    echo "  用 \$book-chapter-revise 修订 $BOOK_NAME 的 $CHAPTER"
+  else
+    echo "  用 \$book-chapter-revise 修订 $BOOK_NAME"
+  fi
+  echo ""
+  echo "修订完成后执行:"
+  if [[ -n "$CHAPTER" ]]; then
+    echo "  python3 $AUTOWRITE_ROOT/scripts/autowrite-state set \"$BOOK_DIR\" $CHAPTER revise done"
+    echo "  python3 $AUTOWRITE_ROOT/scripts/autowrite-state set \"$BOOK_DIR\" $CHAPTER verdict pass"
+  else
+    echo "  python3 $AUTOWRITE_ROOT/scripts/autowrite-state set \"$BOOK_DIR\" chNN revise done"
+    echo "  python3 $AUTOWRITE_ROOT/scripts/autowrite-state set \"$BOOK_DIR\" chNN verdict pass"
+  fi
+}
+
+cmd_settle() {
+  local BOOK_NAME="${1:-}"
+  local CHAPTER="${2:-}"
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "请提供书名"
+    echo "用法: autowrite settle <书名> [chNN]"
+    return 1
+  fi
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+  info "状态提取: $BOOK_NAME ${CHAPTER:-}"
+  python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import Settler
+import glob, os
+book_dir = '$BOOK_DIR'
+draft_dir = None
+for d in ['05-章节草稿/CN', '05-章节草稿/EN', '05-章节草稿']:
+    if os.path.isdir(os.path.join(book_dir, d)):
+        draft_dir = os.path.join(book_dir, d)
+        break
+if not draft_dir:
+    print('找不到草稿目录'); sys.exit(1)
+ch = '${CHAPTER:-}'
+if not ch:
+    import re
+    files = sorted(glob.glob(os.path.join(draft_dir, 'ch*.md')))
+    files = [f for f in files if not any(x in f for x in ['tickets', 'report', 'auto-revisor', 'quality', 'de-ai'])]
+    if not files:
+        print('找不到章节文件'); sys.exit(1)
+    ch_file = files[-1]
+    ch = os.path.basename(ch_file)[:5]
+else:
+    ch_file = os.path.join(draft_dir, f'{ch}.md') if os.path.isfile(os.path.join(draft_dir, f'{ch}.md')) else None
+    if not ch_file:
+        ch_file = glob.glob(os.path.join(draft_dir, f'{ch}*.md'))
+        ch_file = [f for f in ch_file if not any(x in f for x in ['tickets', 'report'])]
+        if ch_file:
+            ch_file = ch_file[0]
+        else:
+            print(f'找不到章节: {ch}'); sys.exit(1)
+with open(ch_file, encoding='utf-8', errors='replace') as f:
+    text = f.read()
+ch_num = int(re.search(r'ch(\d+)', ch).group(1))
+settler = Settler(book_dir)
+delta = settler.extract(text, ch_num)
+settler.apply_delta(delta)
+print(f'✓ {ch} 状态提取完成')
+print(f'  新论点: {len(delta.new_arguments)}')
+print(f'  新证据: {len(delta.new_evidence)}')
+print(f'  伏笔更新: {len(delta.hook_updates)}')
+"
+  python3 "$STATE_TOOL" set "$BOOK_DIR" "${CHAPTER:-chNN}" settle done 2>/dev/null || true
+}
+
+cmd_compose() {
+  local BOOK_NAME="${1:-}"
+  local CHAPTER="${2:-}"
+  if [[ -z "$BOOK_NAME" ]] || [[ -z "$CHAPTER" ]]; then
+    error "用法: autowrite compose <书名> chNN"
+    return 1
+  fi
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+  local CH_NUM="${CHAPTER#ch}"
+  info "上下文组装: $BOOK_NAME $CHAPTER"
+  python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import Composer
+c = Composer('$BOOK_DIR')
+pack = c.compose(int('$CH_NUM'))
+path = c.save_context_pack(pack, int('$CH_NUM'))
+print(f'✓ 上下文包: {pack.total_tokens} tokens, {len(pack.sections)} sections')
+print(f'  保存: {path}')
+print()
+print(pack.budget_report)
+"
+}
+
+cmd_hooks() {
+  local BOOK_NAME="${1:-}"
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "用法: autowrite hooks <书名>"
+    return 1
+  fi
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+  local HOOK_FILE="$BOOK_DIR/truth/hook_ledger.md"
+  if [[ -f "$HOOK_FILE" ]]; then
+    cat "$HOOK_FILE"
+  else
+    info "伏笔账本不存在 — 先写一章或手动创建"
+  fi
+}
+
+cmd_characters() {
+  local BOOK_NAME="${1:-}"
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "用法: autowrite characters <书名>"
+    return 1
+  fi
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+  local CHAR_FILE="$BOOK_DIR/truth/character_board.md"
+  if [[ -f "$CHAR_FILE" ]]; then
+    cat "$CHAR_FILE"
+  else
+    info "角色面板不存在 — 先创建角色"
+  fi
+}
+
+cmd_fingerprint() {
+  local BOOK_NAME="${1:-}"
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "用法: autowrite fingerprint <书名>"
+    return 1
+  fi
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+  info "风格指纹提取: $BOOK_NAME"
+  python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import FingerprintExtractor
+ext = FingerprintExtractor('$BOOK_DIR')
+fp = ext.extract()
+path = ext.save(fp)
+print(f'✓ 风格指纹已保存: {path}')
+print(f'  句子长度: avg={fp.avg_sentence_len}, median={fp.median_sentence_len}')
+print(f'  TTR: {fp.ttr}')
+print(f'  段落类型: {fp.paragraph_type_ratio}')
+"
+}
+
+cmd_rules() {
+  local BOOK_NAME="${1:-}"
+  local CHAPTER="${2:-}"
+  if [[ -z "$BOOK_NAME" ]] || [[ -z "$CHAPTER" ]]; then
+    error "用法: autowrite rules <书名> chNN"
+    return 1
+  fi
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+  if [[ ! -d "$BOOK_DIR" ]]; then
+    error "找不到书籍: $BOOK_NAME"
+    return 1
+  fi
+  info "规则引擎: $BOOK_NAME $CHAPTER"
+  local CH_NUM="${CHAPTER#ch}"
+  python3 -c "
+import sys, os, json; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from book_agent_core import RuleEngine
+engine = RuleEngine('$BOOK_DIR')
+draft_dir = None
+for d in ['05-章节草稿/CN', '05-章节草稿/EN', '05-章节草稿']:
+    if os.path.isdir(os.path.join('$BOOK_DIR', d)):
+        draft_dir = os.path.join('$BOOK_DIR', d)
+        break
+if not draft_dir:
+    print('找不到草稿目录'); sys.exit(1)
+import glob
+ch_files = glob.glob(os.path.join(draft_dir, '${CHAPTER}*.md'))
+ch_files = [f for f in ch_files if not any(x in f for x in ['tickets', 'report', 'auto-revisor'])]
+if not ch_files:
+    print(f'找不到章节: ${CHAPTER}'); sys.exit(1)
+with open(ch_files[0], encoding='utf-8', errors='replace') as f:
+    text = f.read()
+violations = engine.check(text)
+blocked = any(v.level == '阻断' for v in violations)
+out_dir = os.path.join('$BOOK_DIR', 'truth', 'runtime')
+os.makedirs(out_dir, exist_ok=True)
+out_path = os.path.join(out_dir, '${CHAPTER}_rule_report.json')
+engine.save_report(violations, out_path)
+print(f'✓ 规则检查: {len(violations)} 违规')
+for v in violations:
+    mark = '✗' if v.level == '阻断' else '⚠'
+    print(f'  [{mark}] {v.rule_id} ({v.level}): {v.description}')
+print(f'  保存: {out_path}')
+if blocked:
+    sys.exit(1)
+"
+}
+
+cmd_cron() {
+  local SUBCMD="${1:-}"
+  shift 2>/dev/null || true
+  case "$SUBCMD" in
+    list)
+      python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from scripts.autowrite_cron_config import list_tasks
+for t in list_tasks():
+    print(f\"  {t['task_id']}: {t['book_name']} {t['schedule']} {t['action']} {'✓' if t['enabled'] else '✗'}\")
+" 2>/dev/null || info "cron 管理器尚未配置"
+      ;;
+    add)
+      info "添加 cron 任务... (通过 \$book-cron-setup skill)"
+      ;;
+    remove)
+      info "移除 cron 任务... (通过 \$book-cron-setup skill)"
+      ;;
+    run)
+      local BOOK_NAME="${1:-}"
+      if [[ -z "$BOOK_NAME" ]]; then
+        error "用法: autowrite cron run <书名>"
+        return 1
+      fi
+      info "手动触发: $BOOK_NAME"
+      autowrite write next "$BOOK_NAME"
+      ;;
+    status)
+      info "Cron 任务状态"
+      python3 -c "
+import sys; sys.path.insert(0, '$AUTOWRITE_ROOT')
+from scripts.autowrite_cron_config import list_tasks
+for t in list_tasks():
+    status = '启用' if t['enabled'] else '禁用'
+    print(f\"  {t['book_name']}: {t['schedule']} {t['action']} [{status}]\")
+" 2>/dev/null || info "cron 管理器尚未配置"
+      ;;
+    *)
+      error "用法: autowrite cron [add|remove|list|run|status]"
+      ;;
+  esac
+}
+
+# 主入口
+show_help() {
+  cat << EOF
+autowrite - AutoWriteO 命令行工具
+
+用法:
+  autowrite <command> [options]
+
+命令:
+  init <书名> --genre <题材>     初始化书籍工作区
+  write next [书名]              完整管道写下一章
+  write count <书名> <N>         连续写 N 章（分批执行）
+  plan [书名]                    生成章节规划
+  draft [书名]                   只写草稿
+  brief <书名> [章节] [选项]     角色协商/预写 Brief
+  audit <书名> [章节] [选项]     审计章节（5步审计链）
+  revise [书名] [章节]           修订章节
+  status [书名]                  查看书籍状态
+  validate [书名]                校验 book.conf
+  gate <书名>                    检查 Pre-Flight Gate G1-G8
+  fix <书名> <G项>               输出修复建议并路由到对应 skill
+  state <书名>                   查看工作流状态
+  settle <书名> [chNN]            状态提取
+  compose <书名> chNN             预览上下文包+token预算
+  hooks <书名>                    查看伏笔账本
+  characters <书名>               查看角色面板
+  fingerprint <书名>              提取/查看风格指纹
+  rules <书名> chNN              对章节运行确定性规则引擎
+  cron [add|remove|list|run|status]  守护进程管理
+  list                           列出所有书籍
+
+审计选项:
+  --chain       执行完整审计链
+  --step <步骤> 指定审计步骤
+  --status      查看审计进度
+
+Brief 选项:
+  --init        初始化角色体系（persona-research.md）
+  --direction   方向期协商（书成型前）
+  --status      查看协商进度
+
+示例:
+  autowrite init "AI教育" --genre non-fiction
+  autowrite write next "AI教育"
+  autowrite write count "AI教育" 3
+  autowrite brief "AI教育" --init
+  autowrite brief "AI教育" ch03
+  autowrite audit "AI教育"
+  autowrite audit "AI教育" ch03 --chain
+  autowrite validate "AI教育"
+
+更多信息: https://github.com/你的autowrite
+EOF
+}
+
+COMMAND="${1:-}"
+shift 2>/dev/null || true
+
+case "$COMMAND" in
+  init)
+    cmd_init "$@"
+    ;;
+  write)
+    SUBCMD="${1:-}"
+    shift || true
+    case "$SUBCMD" in
+      next)  cmd_write_next "$@" ;;
+      count) cmd_write_count "$@" ;;
+      *)     error "未知 write 子命令: $SUBCMD"; show_help; exit 1 ;;
+    esac
+    ;;
+  plan)
+    cmd_plan "$@"
+    ;;
+  draft)
+    cmd_draft "$@"
+    ;;
+  brief)
+    cmd_brief "$@"
+    ;;
+  audit)
+    cmd_audit "$@"
+    ;;
+  revise)
+    cmd_revise "$@"
+    ;;
+  settle)
+    cmd_settle "$@"
+    ;;
+  compose)
+    cmd_compose "$@"
+    ;;
+  hooks)
+    cmd_hooks "$@"
+    ;;
+  characters)
+    cmd_characters "$@"
+    ;;
+  fingerprint)
+    cmd_fingerprint "$@"
+    ;;
+  rules)
+    cmd_rules "$@"
+    ;;
+  cron)
+    cmd_cron "$@"
+    ;;
+  status)
+    cmd_status "$@"
+    ;;
+  validate)
+    cmd_validate "$@"
+    ;;
+  gate)
+    if [[ -z "${1:-}" ]]; then
+      error "请提供书名"
+      echo "用法: autowrite gate <书名>"
+      exit 1
+    fi
+    _GATE_BOOK_DIR="$BOOKS_DIR/$1"
+    if [[ ! -d "$_GATE_BOOK_DIR" ]]; then
+      error "找不到书籍: $1"
+      exit 1
+    fi
+    python3 "$STATE_TOOL" check-gate "$_GATE_BOOK_DIR" || exit 1
+    ;;
+  fix)
+    if [[ -z "${1:-}" ]] || [[ -z "${2:-}" ]]; then
+      error "用法: autowrite fix <书名> <G项>"
+      echo "  G项: g1 g2 g3 g4 g5 g6 g7 g8"
+      exit 1
+    fi
+    _FIX_BOOK_DIR="$BOOKS_DIR/$1"
+    if [[ ! -d "$_FIX_BOOK_DIR" ]]; then
+      error "找不到书籍: $1"
+      exit 1
+    fi
+    _FIX_GATE="$2"
+    _FIX_BNAME="$1"
+    case "$_FIX_GATE" in
+      g1)
+        echo "修复 G1: 创建 book-structure.md"
+        echo "  Skill: \$book-project-workspace"
+        echo "  对 Hermes 说: 用 \$book-project-workspace 为 $_FIX_BNAME 创建 book-structure.md"
+        ;;
+      g2)
+        echo "修复 G2: 竞品分析"
+        echo "  Skill: \$book-benchmark-analysis"
+        echo "  对 Hermes 说: 用 \$book-benchmark-analysis 为 $_FIX_BNAME 做竞品分析"
+        ;;
+      g3)
+        echo "修复 G3: 差异化定位"
+        echo "  Skill: \$book-differentiation-design"
+        echo "  对 Hermes 说: 用 \$book-differentiation-design 为 $_FIX_BNAME 设计差异化"
+        ;;
+      g4|g7)
+        echo "修复 G4/G7: 风格蓝图"
+        echo "  Skill: \$book-style-blueprint-engine"
+        echo "  对 Hermes 说: 用 \$book-style-blueprint-engine 为 $_FIX_BNAME 创建风格蓝图"
+        ;;
+      g5)
+        echo "修复 G5: 概念卡 ≥3"
+        echo "  Skill: \$book-knowledge-base-builder"
+        echo "  对 Hermes 说: 用 \$book-knowledge-base-builder 为 $_FIX_BNAME 构建知识库"
+        ;;
+      g6)
+        echo "修复 G6: 案例库 ≥3"
+        echo "  Skill: \$book-case-harvester"
+        echo "  对 Hermes 说: 用 \$book-case-harvester 为 $_FIX_BNAME 采集案例"
+        ;;
+      g8)
+        echo "修复 G8: 章节字数目标"
+        echo "  手动编辑 00-index/book-structure.md，添加各章预估字数"
+        ;;
+      *)
+        error "未知 G项: $_FIX_GATE（可选: g1-g8）"
+        exit 1
+        ;;
+    esac
+    ;;
+  state)
+    if [[ -z "${1:-}" ]]; then
+      error "请提供书名"
+      echo "用法: autowrite state <书名>"
+      exit 1
+    fi
+    _STATE_BOOK_DIR="$BOOKS_DIR/$1"
+    if [[ ! -d "$_STATE_BOOK_DIR" ]]; then
+      error "找不到书籍: $1"
+      exit 1
+    fi
+    python3 "$STATE_TOOL" show "$_STATE_BOOK_DIR"
+    ;;
+  list)
+    cmd_list "$@"
+    ;;
+  help|--help|-h)
+    show_help
+    ;;
+  *)
+    error "未知命令: $COMMAND"
+    show_help
+    exit 1
+    ;;
+esac

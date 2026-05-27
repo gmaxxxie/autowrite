@@ -1,0 +1,459 @@
+#!/bin/bash
+# autowrite-init - 初始化书籍工作区 + 真相文件
+# 用法: autowrite init <书名> --genre <题材> [--path <路径>]
+
+set -e
+
+init_usage() {
+  cat << EOF
+用法: autowrite init <书名> --genre <题材> [--path <路径>]
+
+初始化一个新书籍工作区，包含：
+- 书籍目录结构
+- 7 个真相文件（非小说适配版）
+- 项目配置文件
+
+示例:
+  autowrite init "AI教育" --genre non-fiction
+  autowrite init "我的书" --genre non-fiction --path ~/my-books
+EOF
+}
+
+cmd_init() {
+  local BOOK_NAME=""
+  local GENRE="non-fiction"
+  local TARGET_DIR=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --genre)
+        GENRE="$2"
+        shift 2
+        ;;
+      --path)
+        TARGET_DIR="$2"
+        shift 2
+        ;;
+      --help|-h)
+        init_usage
+        exit 0
+        ;;
+      *)
+        if [[ -z "$BOOK_NAME" ]]; then
+          BOOK_NAME="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$BOOK_NAME" ]]; then
+    error "请提供书名"
+    init_usage
+    exit 1
+  fi
+
+  # 确定目标目录
+  if [[ -z "$TARGET_DIR" ]]; then
+    TARGET_DIR="$BOOKS_DIR/$BOOK_NAME"
+  fi
+
+  # 检查是否已存在
+  if [[ -d "$TARGET_DIR" ]]; then
+    error "书籍目录已存在: $TARGET_DIR"
+    exit 1
+  fi
+
+  info "初始化书籍: $BOOK_NAME"
+  info "目录: $TARGET_DIR"
+  info "题材: $GENRE"
+
+  # 用 scaffold_book_project.py 创建标准目录结构
+  SCAFFOLD_SCRIPT="$AUTOWRITE_ROOT/book-writing-skills/skills/book-project-workspace/scripts/scaffold_book_project.py"
+  if [[ -f "$SCAFFOLD_SCRIPT" ]]; then
+    if python3 "$SCAFFOLD_SCRIPT" "$TARGET_DIR" \
+      --book-title "$BOOK_NAME" \
+      --category "$GENRE" 2>&1; then
+      success "脚手架模板已创建"
+    else
+      warn "脚手架脚本失败，使用基础目录结构"
+    fi
+  fi
+
+  # 确保关键目录存在（scaffold 可能因缺少模板而跳过部分）
+  mkdir -p "$TARGET_DIR/truth"
+  mkdir -p "$TARGET_DIR/00-index"
+  mkdir -p "$TARGET_DIR/01-原始素材"
+  mkdir -p "$TARGET_DIR/02-概念卡"
+  mkdir -p "$TARGET_DIR/03-案例库"
+  mkdir -p "$TARGET_DIR/04-书稿/CN"
+  mkdir -p "$TARGET_DIR/04-书稿/EN"
+  mkdir -p "$TARGET_DIR/05-章节草稿/CN"
+  mkdir -p "$TARGET_DIR/05-章节草稿/EN"
+  mkdir -p "$TARGET_DIR/06-出版版准备/封面"
+  mkdir -p "$TARGET_DIR/06-出版版准备/图表"
+  mkdir -p "$TARGET_DIR/06-出版版准备/00-运营资产包"
+  mkdir -p "$TARGET_DIR/07-发布/CN"
+  mkdir -p "$TARGET_DIR/07-发布/EN"
+  mkdir -p "$TARGET_DIR/08-翻译"
+
+  # 创建项目配置
+  cat > "$TARGET_DIR/book.conf" << EOF
+# AutoWriteO 书籍配置文件
+# 此文件自动生成，请勿手动修改格式
+
+BOOK_NAME="$BOOK_NAME"
+GENRE="$GENRE"
+CREATED_AT="$(date -Iseconds)"
+CHAPTER_TARGET=12
+CHAPTER_WORDS_TARGET=2000
+CURRENT_CHAPTER=0
+
+# 真相文件路径
+TRUTH_DIR="$TARGET_DIR/truth"
+EOF
+
+  # 创建 7 个真相文件（非小说适配版）
+  create_truth_files "$TARGET_DIR"
+
+  # 创建 book-structure.md（G1 门禁必需）
+  mkdir -p "$TARGET_DIR/00-index"
+  cat > "$TARGET_DIR/00-index/book-structure.md" << BSEOF
+# 书籍结构
+
+## 基本信息
+- 书名：$BOOK_NAME
+- 题材：$GENRE
+- 目标读者：（待补充）
+- 目标章数：12
+- 每章目标字数：~2000字
+
+## 章节规划
+
+| 章节 | 标题 | 核心论点 | 预估字数 | 状态 |
+|------|------|----------|----------|------|
+| ch01 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch02 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch03 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch04 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch05 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch06 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch07 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch08 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch09 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch10 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch11 | （待规划） | （待规划） | ~2000字 | 待写 |
+| ch12 | （待规划） | （待规划） | ~2000字 | 待写 |
+
+## 全书核心论点
+> （在这里写下本书的核心主张）
+
+## 目标读者画像
+- 年龄/职业：
+- 核心痛点：
+- 阅读动机：
+BSEOF
+
+  # 创建 workflow-state.json 初始状态
+  python3 "$AUTOWRITE_ROOT/scripts/autowrite-state" set "$TARGET_DIR" project init done 2>/dev/null || true
+
+  success "书籍工作区创建完成: $TARGET_DIR"
+  echo ""
+  echo "下一步:"
+  echo "  cd $TARGET_DIR"
+  echo "  autowrite write next $BOOK_NAME"
+  echo ""
+}
+
+create_truth_files() {
+  local BOOK_DIR="$1"
+  local TRUTH_DIR="$BOOK_DIR/truth"
+
+  # 1. argument_state.md - 当前论点状态
+  cat > "$TRUTH_DIR/argument_state.md" << 'EOF'
+# 论点状态追踪
+
+## 书籍核心论点
+> （在这里写下本书的核心主张，一句话）
+
+
+## 各章论点进度
+
+| 章节 | 论点 | 状态 |
+|------|------|------|
+| ch01 | （本章核心论点） | [ ]已完成 [x]进行中 [ ]待写 |
+
+## 当前进行中的论点
+- 章节:
+- 核心主张:
+- 已完成部分:
+- 待完成部分:
+
+## 已闭环的论点
+- （列出已完整论证的论点）
+
+## 待论证的论点
+- （列出还未写的核心论点）
+EOF
+
+  # 2. reader_persona_matrix.md - 目标读者画像
+  cat > "$TRUTH_DIR/reader_persona_matrix.md" << 'EOF'
+# 目标读者画像矩阵
+
+## 核心读者画像
+
+### 主要读者
+- **年龄/职业**:
+- **核心痛点**:
+- **阅读动机**:
+- **期望收获**:
+
+### 次要读者
+- **年龄/职业**:
+- **核心痛点**:
+- **阅读动机**:
+
+## 读者已知信息
+- （读者已经知道的，不需要重复解释）
+
+## 读者未知信息
+- （读者不知道的，需要在书中建立）
+
+## 需要纠正的误解
+- （读者可能有的错误认知）
+
+## 阅读障碍
+- （读者可能觉得难理解的地方，需要提前铺垫）
+
+## 案例共鸣方向
+- 读者最容易产生共鸣的案例类型:
+- 读者最关心的场景:
+EOF
+
+  # 3. evidence_ledger.md - 案例/数据/引用追踪
+  cat > "$TRUTH_DIR/evidence_ledger.md" << 'EOF'
+# 证据账本
+
+## 案例库（已收录）
+
+| ID | 案例名 | 类型 | 章节 | 状态 | 核心用途 |
+|----|--------|------|------|------|----------|
+| C001 | （案例名） | [案例/数据/引用] | ch01 | [x]已用 [ ]待用 | （用途） |
+
+## 数据点（已收录）
+
+| ID | 数据描述 | 来源 | 可靠性 | 章节 |
+|----|----------|------|--------|------|
+| D001 | （数据） | （来源） | [高/中/低] | ch01 |
+
+## 引用（已收录）
+
+| ID | 引用内容 | 来源 | 章节 |
+|----|----------|------|------|
+| Q001 | （引用） | （书名/论文等） | ch01 |
+
+## 待补充的证据缺口
+- （哪些论点还缺证据支撑）
+
+## 案例疲劳检测
+- 已重复使用 N 次以上的案例: （无）
+EOF
+
+  # 4. open_questions.md - 待解决的读者疑问
+  cat > "$TRUTH_DIR/open_questions.md" << 'EOF'
+# 待解决问题追踪
+
+## 章节内未解答的读者疑问
+
+| 章节 | 疑问 | 是否为伏笔 | 计划解答章节 |
+|------|------|-----------|-------------|
+| ch01 | （读者可能产生的疑问） | [是/否] | ch0X |
+
+## 需要在书中回答的核心问题
+- （本书需要回答的核心问题列表）
+
+## 读者可能反驳的点
+- （读者可能会质疑的地方，需要提前准备回应）
+
+## 争议性观点
+- （书中可能有争议的论点，需要更充分论证）
+
+## 已闭环的问题
+- （已在书中回答的问题）
+EOF
+
+  # 5. chapter_summaries.md - 各章摘要
+  cat > "$TRUTH_DIR/chapter_summaries.md" << 'EOF'
+# 章节摘要总览
+
+## 已完成章节
+
+| 章节 | 标题 | 字数 | 核心论点 | 关键案例 | 伏笔 |
+|------|------|------|----------|----------|------|
+| ch01 | （标题） | ~N字 | （本章核心） | C001,C002 | （本章埋下的伏笔） |
+
+## 当前章节
+- 章节: ch0X
+- 标题: （标题）
+- 状态: [ ]规划中 [ ]草稿中 [ ]审计中 [ ]修订中
+
+## 待写章节
+| 章节 | 规划要点 | 依赖前置章节 |
+|------|----------|-------------|
+| ch0X | （规划方向） | ch0Y |
+EOF
+
+  # 6. topic_board.md - 子主题/支线进度
+  cat > "$TRUTH_DIR/topic_board.md" << 'EOF'
+# 子主题进度板
+
+## 主要主题线
+
+### 主题 A
+- 状态: [ ]待开展 [ ]进行中 [x]已完成
+- 涉及章节:
+- 核心内容:
+- 完成度: 0%
+
+### 主题 B
+- 状态: [ ]待开展 [ ]进行中 [ ]已完成
+- 涉及章节:
+- 核心内容:
+- 完成度: 0%
+
+## 支线主题
+
+| 支线 | 状态 | 涉及章节 | 完成度 |
+|------|------|----------|--------|
+| 支线1 | [ ]待开展 | ch0X | 0% |
+
+## 主题关联图
+```
+（用文字描述主题之间的关联）
+主主题A
+  ├─ 支线A1
+  └─ 支线A2
+主主题B
+  └─ 支线B1
+```
+
+## 停滞检测
+- 超过3章未推进的主题: （无）
+EOF
+
+  # 7. reader_journey.md - 读者阅读节奏
+  cat > "$TRUTH_DIR/reader_journey.md" << 'EOF'
+# 读者阅读节奏设计
+
+## 整体节奏规划
+
+### 开头（前3章）
+- 目标: 建立信任、点明痛点、给出承诺
+- 情绪基调:
+- 节奏: [ ]快 [x]慢 - 需要铺垫
+
+### 中段（4-X章）
+- 目标: 层层论证、案例丰富、逻辑严密
+- 情绪基调:
+- 节奏: [ ]快 [ ]慢 - 按需调整
+
+### 结尾（最后3章）
+- 目标: 高潮收尾、行动召唤、余韵回味
+- 情绪基调:
+- 节奏: [x]快 [ ]慢 - 需要冲击力
+
+## 各章节节奏标注
+
+| 章节 | 节奏 | 情绪 | 段落密度 | 注释 |
+|------|------|------|----------|------|
+| ch01 | 快/慢 | 好奇/紧迫 | 密/疏 | （备注） |
+
+## 章节间节奏对比
+- 最快章节: ch0X
+- 最慢章节: ch0X
+- 密度最高: ch0X
+- 密度最低: ch0X
+
+## 情绪曲线设计
+```
+（用文字描述全书的情绪起伏）
+ch01: ████ （建立）
+ch02: ██
+ch03: ███
+...
+```
+EOF
+
+  # 新增 Agent Core truth 文件
+  touch "$BOOK_DIR/truth/current_state.md"
+  cat > "$BOOK_DIR/truth/hook_ledger.md" << 'HOOK_EOF'
+## 伏笔账本
+
+| ID | 类型 | 描述 | 种下章节 | 预期解决 | 状态 | 健康度 |
+|----|------|------|---------|---------|------|--------|
+HOOK_EOF
+
+  cat > "$BOOK_DIR/truth/character_board.md" << 'CHAR_EOF'
+## 角色面板
+
+| ID | 名字 | 类型 | 性格底色 | 信息边界 | 出场章节 |
+|----|------|------|---------|---------|---------|
+CHAR_EOF
+
+  mkdir -p "$BOOK_DIR/truth/characters"
+  mkdir -p "$BOOK_DIR/truth/runtime"
+  touch "$BOOK_DIR/truth/settler_log.md"
+
+  cat > "$BOOK_DIR/00-index/sensitive_words.txt" << 'SW_EOF'
+# 敏感词配置（R09 规则引擎引用）
+# 格式: 级别|词汇
+# 级别: 阻断=必须拦截 / 警告=标记提醒
+# 每行一个，# 开头为注释
+#
+# === 政治类（阻断） ===
+# 阻断|示例词
+#
+# === 色情类（警告） ===
+# 警告|示例词
+#
+# === 极端暴力类（警告） ===
+# 警告|示例词
+SW_EOF
+
+  cat > "$BOOK_DIR/composer_budget.yaml" << 'BUDGET_EOF'
+total_budget: 32000
+categories:
+  book_bible:
+    budget: 4000
+    priority: 0
+  style_voice:
+    budget: 3000
+    priority: 0
+  current_state:
+    budget: 3000
+    priority: 0
+  hook_ledger:
+    budget: 3000
+    priority: 1
+  argument_state:
+    budget: 4000
+    priority: 1
+  chapter_summaries:
+    budget: 4000
+    priority: 1
+  evidence_ledger:
+    budget: 3000
+    priority: 2
+  concept_cards:
+    budget: 3000
+    priority: 2
+  cases:
+    budget: 3000
+    priority: 2
+  character_board:
+    budget: 2000
+    priority: 2
+BUDGET_EOF
+
+  info "真相文件创建完成: $TRUTH_DIR"
+}

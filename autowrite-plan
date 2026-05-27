@@ -1,0 +1,165 @@
+#!/bin/bash
+# autowrite-plan - 生成章节规划
+# 用法:
+#   autowrite plan [书名] [--context <上下文>]
+
+set -e
+
+plan_usage() {
+  cat << EOF
+用法:
+  autowrite plan [书名] [--context <上下文>]
+
+示例:
+  autowrite plan "AI教育"
+  autowrite plan "AI教育" --context "本章重点讲AI辅助家教的边界"
+EOF
+}
+
+# 查找书籍目录
+find_book_dir() {
+  local BOOK_NAME="$1"
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+
+  if [[ -d "$BOOK_DIR" ]]; then
+    echo "$BOOK_DIR"
+    return 0
+  fi
+
+  local CURRENT="$PWD"
+  while [[ "$CURRENT" != "/" ]]; do
+    if [[ -f "$CURRENT/book.conf" ]]; then
+      echo "$CURRENT"
+      return 0
+    fi
+    CURRENT="$(dirname "$CURRENT")"
+  done
+  return 1
+}
+
+# 获取当前章节号
+get_current_chapter() {
+  local BOOK_DIR="$1"
+  if [[ -f "$BOOK_DIR/book.conf" ]]; then
+    grep '^CURRENT_CHAPTER=' "$BOOK_DIR/book.conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"
+  else
+    local COUNT=0
+    for draft_dir in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-chapter-drafts" "$BOOK_DIR/05-章节草稿"; do
+      if [[ -d "$draft_dir" ]]; then
+        COUNT=$(ls "$draft_dir"/*.md 2>/dev/null | wc -l | tr -d ' ')
+        break
+      fi
+    done
+    echo "$COUNT"
+  fi
+}
+
+# 生成章节规划
+cmd_plan() {
+  local BOOK_NAME=""
+  local CONTEXT=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --context)
+        CONTEXT="$2"
+        shift 2
+        ;;
+      --help|-h)
+        plan_usage
+        exit 0
+        ;;
+      *)
+        if [[ -z "$BOOK_NAME" ]]; then
+          BOOK_NAME="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  # 找书
+  if [[ -n "$BOOK_NAME" ]]; then
+    local BOOK_DIR=$(find_book_dir "$BOOK_NAME") || {
+      error "找不到书籍: $BOOK_NAME"
+      exit 1
+    }
+  else
+    if [[ -f "$PWD/book.conf" ]]; then
+      local BOOK_DIR="$PWD"
+    else
+      error "请提供书名或在工作区内执行"
+      exit 1
+    fi
+  fi
+
+  local BOOK_NAME=$(grep '^BOOK_NAME=' "$BOOK_DIR/book.conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
+
+  local CURRENT_CH=$(get_current_chapter "$BOOK_DIR")
+  local NEXT_CH=$((CURRENT_CH + 1))
+
+  info "=========================================="
+  info "生成第 $NEXT_CH 章规划"
+  info "书籍: $BOOK_NAME"
+  info "=========================================="
+
+  # 创建 runtime 目录
+  mkdir -p "$BOOK_DIR/truth/runtime"
+
+  # 生成 intent 文件
+  local INTENT_FILE="$BOOK_DIR/truth/runtime/ch$(printf '%02d' $NEXT_CH).intent.md"
+
+  cat > "$INTENT_FILE" << EOF
+# 第 $NEXT_CH 章写作意图
+
+## 基本信息
+- 生成时间: $(date -Iseconds)
+- 章节: ch$(printf '%02d' $NEXT_CH)
+- 书籍: $BOOK_NAME
+
+## 用户指定的上下文
+${CONTEXT:-（无）}
+
+## 本章核心论点
+> （本章要论证的核心主张是什么？）
+
+
+## 必须保留的内容（must-keep）
+- （从真相文件提取本章必须保留的要点）
+  -
+
+## 必须避免的内容（must-avoid）
+- （本章需要避免的重复/偏离）
+  -
+
+## 案例需求
+- 需要引用的案例: （从 evidence_ledger 匹配）
+- 需要新增的案例: （待补充）
+
+## 与章节的伏笔关联
+- 承接上一章: ch$(printf '%02d' $((NEXT_CH - 1)))
+- 铺垫下一章: ch$(printf '%02d' $((NEXT_CH + 1)))
+
+## 读者节奏设计
+- 本章节奏: [ ]快 [ ]慢
+- 情绪基调:
+- 段落密度: [ ]密 [ ]疏
+
+## 写作检查清单
+- [ ] 核心论点明确
+- [ ] 案例支撑充足
+- [ ] 逻辑连贯无跳跃
+- [ ] 首尾引言不重复
+- [ ] 无机械枚举
+- [ ] 结尾留钩子
+EOF
+
+  success "规划文件已生成: $INTENT_FILE"
+
+  # 显示规划内容
+  echo ""
+  echo "=========================================="
+  echo "  规划预览"
+  echo "=========================================="
+  cat "$INTENT_FILE"
+}

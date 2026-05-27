@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""
+autowrite-state: 工作流状态机 — 读写 workflow-state.json
+
+用法:
+  autowrite-state get <书目录> <章节> <key>
+  autowrite-state set <书目录> <章节> <key> <value>
+  autowrite-state check-gate <书目录> <门禁名>
+  autowrite-state check-audit-chain <书目录> <章节>
+  autowrite-state check-prev-chapter <书目录> <章节>
+  autowrite-state check-brief <书目录> <章节>
+  autowrite-state show <书目录>
+
+状态文件: <书目录>/00-index/workflow-state.json
+
+结构:
+{
+  "ch01": {
+    "brief": "done",          # done / blocked
+    "draft": "done",          # done / blocked
+    "auto-revisor": "done",   # done / blocked / skipped
+    "quality-audit": "done",
+    "de-ai-audit": "done",
+    "cn-localization": "done",
+    "persona-audit": "done",
+    "revise": "done",
+    "verdict": "pass"         # pass / revise / blocked
+  },
+  "project": {
+    "g1_book_structure": "done",
+    "g2_benchmark": "done",
+    "g3_differentiation": "done",
+    "g4_voice": "done",
+    "g5_concepts": "done",
+    "g6_cases": "done",
+    "g7_voice_locked": "done",
+    "g8_word_target": "done"
+  }
+}
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+STATE_FILE = "00-index/workflow-state.json"
+
+AUDIT_STEPS = [
+    "compose",
+    "plan",
+    "rule-check-pre",
+    "brief",
+    "draft",
+    "settle",
+    "auto-revisor",
+    "rule-check-post",
+    "quality-audit",
+    "de-ai-audit",
+    "cn-localization",
+    "persona-audit",
+    "revise",
+]
+
+GATE_CHECKS = {
+    "g1_book_structure": {
+        "desc": "book-structure.md 存在且 >500 bytes",
+        "paths": ["00-index/book-structure.md"],
+        "min_size": 500,
+    },
+    "g2_benchmark": {
+        "desc": "竞品分析存在",
+        "paths": ["02-参考书/reference-book-matrix.md", "00-index/book-review.md"],
+        "any": True,
+    },
+    "g3_differentiation": {
+        "desc": "差异化定位存在",
+        "paths": ["02-参考书/differentiation-strategy.md", "00-index/differentiation.md"],
+        "any": True,
+    },
+    "g4_voice": {
+        "desc": "风格蓝图存在",
+        "paths": ["00-index/style-composition.md"],
+    },
+    "g5_concepts": {
+        "desc": "概念卡 ≥3",
+        "dirs": ["02-概念卡"],
+        "min_count": 3,
+        "ext": ".md",
+    },
+    "g6_cases": {
+        "desc": "案例库 ≥3",
+        "dirs": ["03-案例库"],
+        "min_count": 3,
+        "ext": ".md",
+    },
+    "g7_voice_locked": {
+        "desc": "声音锁定（style-composition.md 有内容）",
+        "paths": ["00-index/style-composition.md"],
+        "min_size": 200,
+    },
+    "g8_word_target": {
+        "desc": "book-structure.md 有章节预估字数",
+        "paths": ["00-index/book-structure.md"],
+        "must_contain": "字",
+    },
+}
+
+GATE_ORDER = ["g1_book_structure", "g2_benchmark", "g3_differentiation",
+              "g4_voice", "g5_concepts", "g6_cases", "g7_voice_locked", "g8_word_target"]
+
+GATE_FIX = {
+    "g1_book_structure": {
+        "skill": "$book-project-workspace",
+        "hint": "创建 00-index/book-structure.md（≥500 bytes）",
+        "cmd": "autowrite fix <书名> g1",
+    },
+    "g2_benchmark": {
+        "skill": "$book-benchmark-analysis",
+        "hint": "创建 02-参考书/reference-book-matrix.md 或 00-index/book-review.md",
+        "cmd": "autowrite fix <书名> g2",
+    },
+    "g3_differentiation": {
+        "skill": "$book-differentiation-design",
+        "hint": "创建 02-参考书/differentiation-strategy.md 或 00-index/differentiation.md",
+        "cmd": "autowrite fix <书名> g3",
+    },
+    "g4_voice": {
+        "skill": "$book-style-blueprint-engine",
+        "hint": "创建 00-index/style-composition.md",
+        "cmd": "autowrite fix <书名> g4",
+    },
+    "g5_concepts": {
+        "skill": "$book-knowledge-base-builder",
+        "hint": "在 02-概念卡/ 下添加 ≥3 个 .md 文件",
+        "cmd": "autowrite fix <书名> g5",
+    },
+    "g6_cases": {
+        "skill": "$book-case-harvester",
+        "hint": "在 03-案例库/ 下添加 ≥3 个 .md 文件",
+        "cmd": "autowrite fix <书名> g6",
+    },
+    "g7_voice_locked": {
+        "skill": "$book-style-blueprint-engine",
+        "hint": "充实 00-index/style-composition.md（≥200 bytes）",
+        "cmd": "autowrite fix <书名> g7",
+    },
+    "g8_word_target": {
+        "skill": "手动",
+        "hint": "在 00-index/book-structure.md 中添加章节预估字数",
+        "cmd": "autowrite fix <书名> g8",
+    },
+}
+
+
+def state_path(book_dir):
+    return os.path.join(book_dir, STATE_FILE)
+
+
+def load_state(book_dir):
+    sp = state_path(book_dir)
+    if os.path.isfile(sp):
+        with open(sp, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_state(book_dir, state):
+    sp = state_path(book_dir)
+    os.makedirs(os.path.dirname(sp), exist_ok=True)
+    with open(sp, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def get_chapter_state(state, chapter):
+    return state.get(chapter, {})
+
+
+def set_chapter_state(state, chapter, key, value):
+    if chapter not in state:
+        state[chapter] = {}
+    state[chapter][key] = value
+    return state
+
+
+def cmd_get(book_dir, chapter, key):
+    state = load_state(book_dir)
+    val = get_chapter_state(state, chapter).get(key, "")
+    print(val)
+
+
+def cmd_set(book_dir, chapter, key, value):
+    state = load_state(book_dir)
+    set_chapter_state(state, chapter, key, value)
+    save_state(book_dir, state)
+
+
+def _check_gate_item(book_dir, gate_name):
+    """Return (passed: bool, detail: str)."""
+    check = GATE_CHECKS.get(gate_name)
+    if not check:
+        return False, f"未知门禁: {gate_name}"
+
+    desc = check.get("desc", gate_name)
+
+    if "paths" in check:
+        found_any = False
+        for p in check["paths"]:
+            full = os.path.join(book_dir, p)
+            if os.path.isfile(full):
+                sz = os.path.getsize(full)
+                min_sz = check.get("min_size", 0)
+                if sz >= min_sz:
+                    mc = check.get("must_contain")
+                    if mc:
+                        with open(full, encoding="utf-8", errors="replace") as f:
+                            if mc in f.read():
+                                found_any = True
+                                break
+                    else:
+                        found_any = True
+                        break
+                elif min_sz > 0:
+                    return False, f"{desc} — 文件过小 ({sz} < {min_sz})"
+        is_any = check.get("any", False)
+        if is_any:
+            if found_any:
+                return True, desc
+            return False, f"{desc} — 所有候选文件均缺失"
+        if found_any:
+            return True, desc
+        return False, f"{desc} — 文件缺失"
+
+    if "dirs" in check:
+        min_count = check.get("min_count", 1)
+        ext = check.get("ext", "")
+        total = 0
+        for d in check["dirs"]:
+            full = os.path.join(book_dir, d)
+            if os.path.isdir(full):
+                for entry in os.listdir(full):
+                    if ext and not entry.endswith(ext):
+                        continue
+                    if os.path.isfile(os.path.join(full, entry)):
+                        total += 1
+        if total >= min_count:
+            return True, desc
+        return False, f"{desc} — {total}/{min_count} 不够"
+
+    return True, desc
+
+
+def cmd_check_gate(book_dir, gate_name=None):
+    gates_to_check = [gate_name] if gate_name else GATE_ORDER
+    state = load_state(book_dir)
+
+    all_pass = True
+    failed_gates = []
+    for g in gates_to_check:
+        passed, detail = _check_gate_item(book_dir, g)
+        fix = GATE_FIX.get(g, {})
+        mark = "✓" if passed else "✗"
+        print(f"  [{mark}] {g}: {detail}")
+        if "project" not in state:
+            state["project"] = {}
+        state["project"][g] = "done" if passed else "blocked"
+        if not passed:
+            all_pass = False
+            failed_gates.append(g)
+
+    save_state(book_dir, state)
+
+    if failed_gates:
+        print("")
+        print("  修复建议:")
+        for g in failed_gates:
+            fix = GATE_FIX.get(g, {})
+            print(f"    {g}: {fix.get('hint', '')}")
+            print(f"      Skill: {fix.get('skill', '')}")
+            print(f"      命令: {fix.get('cmd', '').replace('<书名>', os.path.basename(book_dir))}")
+        print("")
+    return 0 if all_pass else 1
+
+
+def _detect_draft_dir(book_dir):
+    for d in ["05-章节草稿/CN", "05-章节草稿/EN", "05-章节草稿", "05-chapter-drafts"]:
+        full = os.path.join(book_dir, d)
+        if os.path.isdir(full):
+            return full
+    return os.path.join(book_dir, "05-章节草稿", "CN")
+
+
+def _audit_file_exists(draft_dir, chapter, audit_type):
+    """Check if an audit report file exists for a chapter."""
+    import glob as g
+    patterns = {
+        "auto-revisor": f"{draft_dir}/{chapter}*auto-revisor-report*.md",
+        "quality-audit": f"{draft_dir}/{chapter}*quality-tickets*.md",
+        "de-ai-audit": f"{draft_dir}/{chapter}*de-ai-tickets*.md",
+        "cn-localization": f"{draft_dir}/{chapter}*cn-localization-tickets*.md",
+        "persona-audit": f"{draft_dir}/{chapter}*persona-audit*.md",
+    }
+    pat = patterns.get(audit_type)
+    if pat:
+        return len(g.glob(pat)) > 0
+    return False
+
+
+def _brief_exists(book_dir, chapter):
+    brief_dir = os.path.join(book_dir, "00-index", "chapter-pre-write")
+    if not os.path.isdir(brief_dir):
+        return False
+    import glob as g
+    return len(g.glob(f"{brief_dir}/{chapter}*-brief.md")) > 0
+
+
+def cmd_check_audit_chain(book_dir, chapter):
+    """Check if all prior audit steps are done before the next one."""
+    state = load_state(book_dir)
+    ch_state = get_chapter_state(state, chapter)
+    draft_dir = _detect_draft_dir(book_dir)
+
+    blocked_by = []
+    for step in AUDIT_STEPS:
+        # Check state file
+        if ch_state.get(step) == "done":
+            continue
+        # Check filesystem
+        if step == "brief":
+            if _brief_exists(book_dir, chapter):
+                continue
+            blocked_by.append(("brief", "章节预写 brief 未完成"))
+            break
+        elif step == "draft":
+            import glob as g
+            if g.glob(f"{draft_dir}/{chapter}.md") or g.glob(f"{draft_dir}/{chapter}-*.md"):
+                # Has draft but needs to exclude audit files
+                has_raw = False
+                for f in g.glob(f"{draft_dir}/{chapter}*.md"):
+                    bn = os.path.basename(f)
+                    if any(x in bn for x in ["quality", "de-ai", "auto-revisor", "cn-localization", "persona", "tickets", "report"]):
+                        continue
+                    has_raw = True
+                    break
+                if has_raw:
+                    continue
+            blocked_by.append(("draft", "章节草稿未完成"))
+            break
+        elif step in ("auto-revisor", "quality-audit", "de-ai-audit", "cn-localization", "persona-audit"):
+            if _audit_file_exists(draft_dir, chapter, step):
+                continue
+            blocked_by.append((step, f"{step} 未完成"))
+            break
+
+    if blocked_by:
+        for step, reason in blocked_by:
+            print(f"  ✗ {step}: {reason}", file=sys.stderr)
+        return 1
+
+    print(f"  ✓ {chapter} 审计链完整")
+    return 0
+
+
+def cmd_check_prev_chapter(book_dir, chapter):
+    """Check if the previous chapter has passed audit."""
+    import re
+    m = re.search(r'ch(\d+)', chapter)
+    if not m:
+        return 0
+    ch_num = int(m.group(1))
+    if ch_num <= 1:
+        return 0
+
+    prev_ch = f"ch{ch_num - 1:02d}"
+    state = load_state(book_dir)
+    prev = get_chapter_state(state, prev_ch)
+
+    verdict = prev.get("verdict", "")
+    if verdict == "pass":
+        print(f"  ✓ {prev_ch} 审计已通过")
+        return 0
+
+    draft_dir = _detect_draft_dir(book_dir)
+    has_quality = _audit_file_exists(draft_dir, prev_ch, "quality-audit")
+    if not has_quality:
+        print(f"  ✗ {prev_ch} quality-audit 未完成 — 不能写 {chapter}", file=sys.stderr)
+        return 1
+
+    print(f"  ! {prev_ch} quality-audit 已完成但 verdict 未标记 pass")
+    return 0
+
+
+def cmd_check_brief(book_dir, chapter):
+    """Check if brief exists for this chapter."""
+    if _brief_exists(book_dir, chapter):
+        print(f"  ✓ {chapter} brief 已完成")
+        return 0
+
+    pr_file = os.path.join(book_dir, "00-index", "persona-research.md")
+    if not os.path.isfile(pr_file):
+        print(f"  ✗ persona-research.md 不存在 — 先执行 autowrite brief <书名> --init", file=sys.stderr)
+        return 1
+
+    print(f"  ✗ {chapter} brief 未完成 — 先执行 autowrite brief <书名> {chapter}", file=sys.stderr)
+    return 1
+
+
+def cmd_show(book_dir):
+    state = load_state(book_dir)
+    if not state:
+        print("  暂无状态记录")
+        return
+
+    proj = state.get("project", {})
+    if proj:
+        print("  项目门禁:")
+        for g in GATE_ORDER:
+            v = proj.get(g, "—")
+            mark = "✓" if v == "done" else "✗"
+            print(f"    [{mark}] {g}: {v}")
+        print()
+
+    for key in sorted(state.keys()):
+        if key == "project":
+            continue
+        ch = state[key]
+        print(f"  {key}:")
+        for step in AUDIT_STEPS:
+            v = ch.get(step, "—")
+            mark = "✓" if v == "done" else ("⏳" if v == "blocked" else "✗")
+            print(f"    [{mark}] {step}: {v}")
+        verdict = ch.get("verdict", "—")
+        print(f"    verdict: {verdict}")
+        print()
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("用法: autowrite-state <command> <书目录> [args...]", file=sys.stderr)
+        sys.exit(1)
+
+    command = sys.argv[1]
+    book_dir = sys.argv[2]
+
+    if not os.path.isdir(book_dir):
+        print(f"目录不存在: {book_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    if command == "get":
+        if len(sys.argv) < 5:
+            sys.exit(1)
+        cmd_get(book_dir, sys.argv[3], sys.argv[4])
+    elif command == "set":
+        if len(sys.argv) < 6:
+            sys.exit(1)
+        cmd_set(book_dir, sys.argv[3], sys.argv[4], sys.argv[5])
+    elif command == "check-gate":
+        gate = sys.argv[3] if len(sys.argv) > 3 else None
+        sys.exit(cmd_check_gate(book_dir, gate))
+    elif command == "check-audit-chain":
+        if len(sys.argv) < 4:
+            sys.exit(1)
+        sys.exit(cmd_check_audit_chain(book_dir, sys.argv[3]))
+    elif command == "check-prev-chapter":
+        if len(sys.argv) < 4:
+            sys.exit(1)
+        sys.exit(cmd_check_prev_chapter(book_dir, sys.argv[3]))
+    elif command == "check-brief":
+        if len(sys.argv) < 4:
+            sys.exit(1)
+        sys.exit(cmd_check_brief(book_dir, sys.argv[3]))
+    elif command == "show":
+        cmd_show(book_dir)
+    else:
+        print(f"未知命令: {command}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

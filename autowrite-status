@@ -1,0 +1,281 @@
+#!/bin/bash
+# autowrite-status - 查看书籍状态
+# 用法:
+#   autowrite status [书名]
+#   autowrite list
+
+status_usage() {
+  cat << EOF
+用法:
+  autowrite status [书名]    查看书籍详细状态
+  autowrite list             列出所有书籍
+
+示例:
+  autowrite status "AI教育"
+  autowrite list
+EOF
+}
+
+find_book_dir() {
+  local BOOK_NAME="$1"
+  local BOOK_DIR="$BOOKS_DIR/$BOOK_NAME"
+
+  if [[ -d "$BOOK_DIR" ]]; then
+    echo "$BOOK_DIR"
+    return 0
+  fi
+
+  local CURRENT="$PWD"
+  while [[ "$CURRENT" != "/" ]]; do
+    if [[ -f "$CURRENT/book.conf" ]]; then
+      echo "$CURRENT"
+      return 0
+    fi
+    CURRENT="$(dirname "$CURRENT")"
+  done
+  return 1
+}
+
+conf_val() {
+  local CONF="$1"
+  local KEY="$2"
+  grep "^${KEY}=" "$CONF" 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^\"//;s/\"$//" | sed "s/^'//;s/'$//"
+}
+
+count_words() {
+  local BOOK_DIR="$1"
+  local TOTAL=0
+  for draft_dir in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-章节草稿/EN" "$BOOK_DIR/05-chapter-drafts" "$BOOK_DIR/05-章节草稿" "$BOOK_DIR/04-章节草稿/CN" "$BOOK_DIR/04-章节草稿" "$BOOK_DIR/chapters"; do
+    if [[ -d "$draft_dir" ]]; then
+      for f in "$draft_dir"/*.md; do
+        if [[ -f "$f" ]]; then
+          case "$(basename "$f")" in
+            *quality*|*de-ai*|*auto-revisor*|*tickets*|*report*|*README*|*checklist*|*brief*|*style*|*cn-localization*) continue ;;
+          esac
+          local WORDS=$(cat "$f" | grep -v '^#' | grep -v '^$' | wc -c)
+          TOTAL=$((TOTAL + WORDS))
+        fi
+      done
+    fi
+  done
+  echo $TOTAL
+}
+
+count_draft_files() {
+  local BOOK_DIR="$1"
+  local COUNT=0
+  for draft_dir in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-章节草稿/EN" "$BOOK_DIR/05-chapter-drafts" "$BOOK_DIR/05-章节草稿" "$BOOK_DIR/04-章节草稿/CN" "$BOOK_DIR/04-章节草稿" "$BOOK_DIR/chapters"; do
+    if [[ -d "$draft_dir" ]]; then
+      for f in "$draft_dir"/*.md; do
+        if [[ -f "$f" ]]; then
+          case "$(basename "$f")" in
+            *quality*|*de-ai*|*auto-revisor*|*tickets*|*report*|*README*|*checklist*|*brief*|*style*|*cn-localization*) continue ;;
+          esac
+          COUNT=$((COUNT + 1))
+        fi
+      done
+    fi
+  done
+  echo $COUNT
+}
+
+get_truth_chapters() {
+  local BOOK_DIR="$1"
+  local SUMMARY_FILE="$BOOK_DIR/truth/chapter_summaries.md"
+  if [[ -f "$SUMMARY_FILE" ]]; then
+    awk '/^## 当前章节/{exit} /^\| ch[0-9]+ \|.*~[0-9]+字/{count++} END{print+count}' "$SUMMARY_FILE" 2>/dev/null || echo "0"
+  else
+    echo "0"
+  fi
+}
+
+get_truth_wordcount() {
+  local BOOK_DIR="$1"
+  local SUMMARY_FILE="$BOOK_DIR/truth/chapter_summaries.md"
+  if [[ -f "$SUMMARY_FILE" ]]; then
+    echo $(grep -oE "~[0-9]+字" "$SUMMARY_FILE" 2>/dev/null | tr -d '字~,' | awk '{sum+=$1} END {print sum}')
+  else
+    echo "0"
+  fi
+}
+
+count_audit_files() {
+  local BOOK_DIR="$1"
+  local TYPE="$2"
+  local COUNT=0
+  for draft_dir in "$BOOK_DIR/05-章节草稿/CN" "$BOOK_DIR/05-章节草稿/EN" "$BOOK_DIR/05-chapter-drafts" "$BOOK_DIR/05-章节草稿" "$BOOK_DIR/04-章节草稿/CN" "$BOOK_DIR/04-章节草稿" "$BOOK_DIR/chapters"; do
+    if [[ -d "$draft_dir" ]]; then
+      case "$TYPE" in
+        auto-revisor) COUNT=$((COUNT + $(ls "$draft_dir"/*auto-revisor-report*.md 2>/dev/null | wc -l))) ;;
+        quality) COUNT=$((COUNT + $(ls "$draft_dir"/*quality-tickets*.md 2>/dev/null | wc -l))) ;;
+        de-ai) COUNT=$((COUNT + $(ls "$draft_dir"/*de-ai-tickets*.md 2>/dev/null | wc -l))) ;;
+        cn-localization) COUNT=$((COUNT + $(ls "$draft_dir"/*cn-localization-tickets*.md 2>/dev/null | wc -l))) ;;
+      esac
+    fi
+  done
+  echo $COUNT
+}
+
+show_book_status() {
+  local BOOK_DIR="$1"
+  local CONF="$BOOK_DIR/book.conf"
+
+  if [[ ! -f "$CONF" ]]; then
+    error "不是有效的书籍目录: $BOOK_DIR"
+    return 1
+  fi
+
+  local BNAME=$(conf_val "$CONF" BOOK_NAME)
+  local BGENRE=$(conf_val "$CONF" GENRE)
+  local BCreated=$(conf_val "$CONF" CREATED_AT)
+  local BTARGET=$(conf_val "$CONF" CHAPTER_TARGET)
+
+  echo ""
+  echo "============================================"
+  echo -e "  ${BLUE}${BNAME}${NC}"
+  echo "============================================"
+  echo ""
+
+  echo -e "${GREEN}基本信息${NC}"
+  echo "  题材: ${BGENRE:-非小说}"
+  echo "  创建时间: ${BCreated:-未知}"
+  echo ""
+
+  local CHAPTERS_DONE=$(get_truth_chapters "$BOOK_DIR")
+  local CHAPTERS_FROM_DIR=$(count_draft_files "$BOOK_DIR")
+
+  echo -e "${GREEN}章节进度${NC}"
+  echo "  已完成: $CHAPTERS_DONE 章（truth/）"
+  if [[ $CHAPTERS_FROM_DIR -gt 0 ]]; then
+    echo "  草稿文件: $CHAPTERS_FROM_DIR 个"
+  fi
+  if [[ -n "$BTARGET" ]] && [[ "$BTARGET" -gt 0 ]]; then
+    echo "  目标: $BTARGET 章"
+    local PROGRESS=$((CHAPTERS_DONE * 100 / BTARGET))
+    echo -n "  进度: ["
+    for i in $(seq 1 20); do
+      if [[ $i -le $((PROGRESS / 5)) ]]; then
+        echo -n "█"
+      else
+        echo -n "░"
+      fi
+    done
+    echo "] $PROGRESS%"
+  fi
+  echo ""
+
+  local TOTAL_CHARS=$(get_truth_wordcount "$BOOK_DIR")
+  local TOTAL_FROM_DIR=$(count_words "$BOOK_DIR")
+  echo -e "${GREEN}字数统计${NC}"
+  if [[ "$TOTAL_CHARS" -gt 0 ]]; then
+    local FORMATTED=$(numfmt --grouping "$TOTAL_CHARS" 2>/dev/null || echo "$TOTAL_CHARS")
+    echo "  总字数: $FORMATTED 字（truth/）"
+  elif [[ $TOTAL_FROM_DIR -gt 0 ]]; then
+    local FORMATTED=$(numfmt --grouping "$TOTAL_FROM_DIR" 2>/dev/null || echo "$TOTAL_FROM_DIR")
+    echo "  总字数: $FORMATTED 字（目录扫描）"
+  else
+    echo "  总字数: 0 字"
+  fi
+  if [[ "$CHAPTERS_DONE" -gt 0 && "$TOTAL_CHARS" -gt 0 ]]; then
+    echo "  平均章字数: $((TOTAL_CHARS / CHAPTERS_DONE)) 字"
+  fi
+  echo ""
+
+  echo -e "${GREEN}审计状态${NC}"
+  local REVISOR_COUNT=$(count_audit_files "$BOOK_DIR" "auto-revisor")
+  local QUALITY_COUNT=$(count_audit_files "$BOOK_DIR" "quality")
+  local DEAI_COUNT=$(count_audit_files "$BOOK_DIR" "de-ai")
+  local CNLOC_COUNT=$(count_audit_files "$BOOK_DIR" "cn-localization")
+  echo "  auto-revisor 报告: $REVISOR_COUNT 个"
+  echo "  quality-audit 报告: $QUALITY_COUNT 个"
+  echo "  de-ai-audit 报告: $DEAI_COUNT 个"
+  echo "  cn-localization 报告: $CNLOC_COUNT 个"
+  if [[ $CHAPTERS_FROM_DIR -gt 0 ]]; then
+    if [[ $QUALITY_COUNT -ge $CHAPTERS_FROM_DIR ]]; then
+      echo "  审计覆盖率: ✅ 全部章节已审计"
+    else
+      echo "  审计覆盖率: $QUALITY_COUNT/$CHAPTERS_FROM_DIR 章"
+    fi
+  fi
+  echo ""
+
+  echo -e "${GREEN}真相文件${NC}"
+  local TRUTH_FILES=(
+    "argument_state.md:论点状态"
+    "reader_persona_matrix.md:读者画像"
+    "evidence_ledger.md:证据账本"
+    "open_questions.md:待解决问题"
+    "chapter_summaries.md:章节摘要"
+    "topic_board.md:子主题进度"
+    "reader_journey.md:阅读节奏"
+  )
+
+  for item in "${TRUTH_FILES[@]}"; do
+    IFS=':' read -r file desc <<< "$item"
+    if [[ -f "$BOOK_DIR/truth/$file" ]]; then
+      echo -e "  ✓ ${desc}"
+    else
+      echo -e "  ✗ ${desc} (缺失)"
+    fi
+  done
+  echo ""
+
+  if [[ -f "$BOOK_DIR/truth/evidence_ledger.md" ]]; then
+    local CASE_COUNT=$(grep -c "^| C" "$BOOK_DIR/truth/evidence_ledger.md" 2>/dev/null || echo "0")
+    echo -e "${GREEN}证据统计${NC}"
+    echo "  已收录案例: $CASE_COUNT 个"
+    echo ""
+  fi
+}
+
+cmd_list() {
+  echo ""
+  echo "AutoWriteO 书籍列表"
+  echo ""
+
+  if [[ ! -d "$BOOKS_DIR" ]]; then
+    warn "暂无书籍目录: $BOOKS_DIR"
+    echo "创建第一本书: autowrite init <书名> --genre non-fiction"
+    return
+  fi
+
+  local COUNT=0
+  for dir in "$BOOKS_DIR"/*/; do
+    if [[ -f "$dir/book.conf" ]]; then
+      COUNT=$((COUNT + 1))
+      local BNAME=$(conf_val "$dir/book.conf" BOOK_NAME)
+      local BGENRE=$(conf_val "$dir/book.conf" GENRE)
+      local CHAPTERS=$(get_truth_chapters "$dir")
+      echo "  ${BNAME:-$(basename "$dir")}  ${BGENRE:-非小说}  ${CHAPTERS}章"
+    fi
+  done
+
+  if [[ $COUNT -eq 0 ]]; then
+    echo "  暂无书籍"
+    echo ""
+    echo "创建第一本书: autowrite init <书名> --genre non-fiction"
+  else
+    echo ""
+    echo "共 $COUNT 本书"
+  fi
+}
+
+cmd_status() {
+  local BOOK_NAME="$1"
+
+  if [[ -z "$BOOK_NAME" ]]; then
+    if [[ -f "$PWD/book.conf" ]]; then
+      show_book_status "$PWD"
+    else
+      error "请提供书名或在工作区内执行"
+      echo ""
+      cmd_list
+    fi
+  else
+    local BOOK_DIR=$(find_book_dir "$BOOK_NAME") || {
+      error "找不到书籍: $BOOK_NAME"
+      exit 1
+    }
+    show_book_status "$BOOK_DIR"
+  fi
+}
