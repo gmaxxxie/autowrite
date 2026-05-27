@@ -6,12 +6,7 @@
   <img src="https://img.shields.io/badge/Python-3.8+-yellow.svg?style=flat-square" alt="Python">
 </p>
 
-<p align="center">
-  <img src="https://cdn.hiapi.ai/relays/ali_image/2026-05/c92e17d515aaeef1.png" width="48%" alt="AutoWrite CLI Overview">
-  <img src="https://cdn.hiapi.ai/relays/ali_image/2026-05/62949d561b1e2db2.png" width="48%" alt="AutoWrite Architecture">
-</p>
 
----
 
 > **AI Native 的书籍写作命令行工具。输入书名，输出一本完整的书。**
 
@@ -81,6 +76,10 @@ autowrite status mybook                        # 查看状态
 - **风格指纹**：`fingerprint.py` 保持全书风格一致
 - **模块化 CLI**：每个命令独立，可单独调用也可组合使用
 - **纯 Bash + Python**：无重型依赖，`book-agent-core` 仅用标准库
+
+<p align="center">
+  <img src="https://cdn.hiapi.ai/relays/ali_image/2026-05/a8e1a717b533bad3.png" width="100%" alt="AutoWrite CLI Workflow">
+</p>
 
 ---
 
